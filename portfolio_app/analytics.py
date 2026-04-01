@@ -190,29 +190,38 @@ def compare_snapshots(current_df: pd.DataFrame, previous_df: pd.DataFrame) -> pd
         book_curr = row["book_price_curr"]
         last_curr = row["last_price_curr"]
 
+        # ロング/ショートで符号が逆
+        # ロング: 含み益 = (時価 - 簿価) × 数量  (値上がりで利益)
+        # ショート: 含み益 = (簿価 - 時価) × 数量  (値下がりで利益)
+        def _unrealized(book, last, qty):
+            if not book or not last or qty == 0:
+                return 0
+            if qty > 0:  # ロング
+                return (last - book) * abs(qty)
+            else:  # ショート
+                return (book - last) * abs(qty)
+
         # デイトレ・解消: 実現損益がそのままアクションの結果
         if action in ("デイトレ", "買い解消", "売り解消"):
             return realized
 
-        # 新規: 含み損益 = (時価 - 簿価) × 数量
+        # 新規: 含み損益 (方向を考慮)
         if action in ("新規買い", "新規売り"):
-            if book_curr and last_curr and qty_diff != 0:
-                return (last_curr - book_curr) * abs(qty_diff)
-            return row["unrealized_pl_curr"]
+            curr_qty = row["net_qty_curr"]
+            return _unrealized(book_curr, last_curr, curr_qty) + realized
 
-        # 増し・返済・ドテン: 差分数量の含み損益 + 実現損益
+        # 増し: 差分数量の含み損益 + 実現損益
         if action in ("買い増し", "売り増し"):
-            # 新規分: (時価 - 簿価) × 追加数量 (簿価は平均に変わっているので近似)
-            if book_curr and last_curr and qty_diff != 0:
-                new_pl = (last_curr - book_curr) * abs(qty_diff)
-                return new_pl + realized
-            return realized
+            return _unrealized(book_curr, last_curr, qty_diff) + realized
 
+        # 返済: 実現損益
         if action in ("買い返済", "売り返済"):
             return realized
 
+        # ドテン: 実現損益 + 新ポジションの含み損益
         if action in ("ドテン買い", "ドテン売り"):
-            return realized + row.get("unrealized_pl_curr", 0)
+            curr_qty = row["net_qty_curr"]
+            return realized + _unrealized(book_curr, last_curr, curr_qty)
 
         return row["tr_pl_diff"]
 
