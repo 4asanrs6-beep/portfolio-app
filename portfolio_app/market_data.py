@@ -22,6 +22,15 @@ BENCHMARK_LABELS = {
 }
 
 
+def is_equity_code(code: str) -> bool:
+    """通常の個別株コード (4〜5桁数字) かどうかを判定。先物・指数等を除外。"""
+    c = str(code).strip()
+    # 4桁 or 5桁の数字のみが個別株
+    if not c.isdigit():
+        return False
+    return 4 <= len(c) <= 5
+
+
 # ---------------------------------------------------------------------------
 # J-Quants API client wrapper
 # ---------------------------------------------------------------------------
@@ -68,7 +77,10 @@ class JQuantsClient:
         start_date: str,
         end_date: str,
     ) -> pd.DataFrame:
-        """個別銘柄の日足株価を取得。日付は YYYY-MM-DD。"""
+        """個別銘柄の日足株価を取得。日付は YYYY-MM-DD。先物等は空 DataFrame。"""
+        if not is_equity_code(code):
+            return pd.DataFrame()
+
         cache_key = f"stock_{code}_{start_date}_{end_date}"
         if cache_key in self._cache:
             return self._cache[cache_key]
@@ -191,6 +203,9 @@ class JQuantsClient:
 
     def get_stock_info(self, code: str) -> dict:
         """yfinance から銘柄の時価総額・需給・バリュエーション情報を取得。"""
+        if not is_equity_code(code):
+            return {}
+
         cache_key = f"yf_info_{code}"
         if cache_key in self._cache:
             return self._cache[cache_key]
@@ -247,6 +262,9 @@ class JQuantsClient:
 
     def get_margin_balance(self, code: str, weeks: int = 8) -> pd.DataFrame:
         """信用残 (買残・売残・貸借倍率) の週次推移を取得。"""
+        if not is_equity_code(code):
+            return pd.DataFrame()
+
         cache_key = f"margin_{code}_{weeks}"
         if cache_key in self._cache:
             return self._cache[cache_key]
@@ -303,6 +321,9 @@ def compute_price_changes(
     code: str,
 ) -> dict:
     """直近の騰落率を複数期間で計算。"""
+    if not is_equity_code(code):
+        return {}
+
     end_date = datetime.now().date()
     start_date = (end_date - timedelta(days=400)).isoformat()
     end_str = end_date.isoformat()
@@ -360,9 +381,11 @@ def fetch_portfolio_stock_info(
     client: JQuantsClient,
     codes: list[str],
 ) -> pd.DataFrame:
-    """ポートフォリオ全銘柄の yfinance 情報をまとめて取得。"""
+    """ポートフォリオ全銘柄の yfinance 情報をまとめて取得。先物等はスキップ。"""
     rows = []
     for code in codes:
+        if not is_equity_code(code):
+            continue
         info = client.get_stock_info(code)
         if info:
             info["コード"] = code.rstrip("0") if len(code) == 5 else code
@@ -745,6 +768,16 @@ def compute_portfolio_all(
 
     for _, row in unique_codes.iterrows():
         code = row["code"]
+        if not is_equity_code(code):
+            # 先物・指数等はベータ計算不可 → ウェイト情報だけ残す
+            stock_rows.append({
+                "コード": code,
+                "銘柄名": row["name"],
+                "方向": row["direction"],
+                "ウェイト(%)": round(row["weight_pct"], 2),
+                "絶対ウェイト(%)": round(row["abs_weight_pct"], 2),
+            })
+            continue
         try:
             stock_df = client.get_stock_prices(code, longest_start, end_str)
         except Exception as e:

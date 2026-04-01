@@ -43,6 +43,7 @@ from portfolio_app.market_data import (
     compute_price_changes,
     enrich_portfolio_with_market_info,
     fetch_portfolio_stock_info,
+    is_equity_code,
 )
 from portfolio_app.parser import parse_positions, split_blocks
 
@@ -924,6 +925,8 @@ with tab_market:
             with st.spinner("全銘柄の騰落率を計算中..."):
                 chg_rows = []
                 for code in weighted["code"].unique():
+                    if not is_equity_code(code):
+                        continue
                     chg = compute_price_changes(jq_client, code)
                     if chg:
                         chg_rows.append({
@@ -942,12 +945,14 @@ with tab_market:
             with st.spinner("全銘柄の信用残を取得中..."):
                 margin_rows = []
                 for code in weighted["code"].unique():
+                    if not is_equity_code(code):
+                        continue
                     try:
                         mdf = jq_client.get_margin_balance(code, weeks=4)
                         if not mdf.empty:
                             lat = mdf.iloc[-1]
                             margin_rows.append({
-                                "コード": code.rstrip("0") if len(code) == 5 else code,
+                                "コード": code.rstrip("0") if is_equity_code(code) and len(code) == 5 else code,
                                 "貸借倍率": lat.get("貸借倍率"),
                                 "買残増減(%)": lat.get("買残増減率(%)"),
                             })
