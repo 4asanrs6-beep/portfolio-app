@@ -898,15 +898,71 @@ with tab_actions:
             st.info("前日データがないため当日アクションを判定できません。")
         else:
             actions_df = compare_snapshots(current_df, previous_df)
-            summary_df = build_action_summary(actions_df)
-            left, right = st.columns([1, 2])
-            with left:
-                render_table(summary_df, f"actions_summary_{selected_date}.csv", "当日アクション集計CSV")
-            with right:
-                options = ["すべて"] + actions_df["当日アクション"].drop_duplicates().tolist()
-                focus_action = st.selectbox("絞り込み", options, key="action_filter")
-                filtered = actions_df if focus_action == "すべて" else actions_df[actions_df["当日アクション"] == focus_action]
-                render_table(filtered, f"actions_{selected_date}.csv", "当日アクションCSV")
+            # 変化なしを除外した実アクション
+            real_actions = actions_df[actions_df["当日アクション"] != "変化なし"]
+            summary_df = build_action_summary(real_actions)
+
+            # ---- KPI ----
+            total_actions = len(real_actions)
+            wins = int((real_actions["勝敗"] == "Win").sum()) if "勝敗" in real_actions.columns else 0
+            losses = int((real_actions["勝敗"] == "Lose").sum()) if "勝敗" in real_actions.columns else 0
+            win_rate = f"{wins / (wins + losses) * 100:.0f}%" if (wins + losses) > 0 else "-"
+            tr_total = real_actions["TR損益差分"].sum() if "TR損益差分" in real_actions.columns else 0
+            real_total = real_actions["実現損益差分"].sum() if "実現損益差分" in real_actions.columns else 0
+
+            st.markdown(f"""
+            <div class="trend-kpi-row">
+              <div class="trend-kpi accent-pl">
+                <div class="trend-kpi-label">アクション数</div>
+                <div class="trend-kpi-value">{total_actions}</div>
+                <div class="trend-kpi-sub">新規/増減/解消等</div>
+              </div>
+              <div class="trend-kpi accent-real">
+                <div class="trend-kpi-label">勝敗</div>
+                <div class="trend-kpi-value">{wins}W - {losses}L</div>
+                <div class="trend-kpi-sub">勝率: {win_rate}</div>
+              </div>
+              <div class="trend-kpi accent-eval">
+                <div class="trend-kpi-label">TR損益 (当日アクション分)</div>
+                <div class="trend-kpi-value">{_colored(tr_total)}</div>
+              </div>
+              <div class="trend-kpi accent-val">
+                <div class="trend-kpi-label">実現損益 (当日アクション分)</div>
+                <div class="trend-kpi-value">{_colored(real_total)}</div>
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # ---- アクション集計テーブル ----
+            st.markdown('<div class="trend-section-title">アクション別集計</div>', unsafe_allow_html=True)
+            st.dataframe(summary_df, width="stretch", hide_index=True)
+
+            # ---- アクション一覧 ----
+            st.markdown('<div class="trend-section-title">アクション詳細</div>', unsafe_allow_html=True)
+
+            filter_options = ["すべて"] + real_actions["当日アクション"].drop_duplicates().tolist()
+            focus_action = st.selectbox("絞り込み", filter_options, key="action_filter")
+            filtered = real_actions if focus_action == "すべて" else real_actions[real_actions["当日アクション"] == focus_action]
+
+            # 表示列を絞って見やすく
+            display_cols = [c for c in [
+                "当日アクション", "勝敗", "コード", "銘柄名", "方向",
+                "数量変化", "前日簿価", "当日簿価", "前日時価", "当日時価",
+                "TR損益差分", "実現損益差分", "評価損益差分", "評価額差分",
+            ] if c in filtered.columns]
+            st.dataframe(format_display_table(filtered[display_cols]), width="stretch", hide_index=True)
+
+            # ---- 変化なし (折りたたみ) ----
+            unchanged = actions_df[actions_df["当日アクション"] == "変化なし"]
+            if not unchanged.empty:
+                with st.expander(f"変化なし ({len(unchanged)}件)", expanded=False):
+                    unch_cols = [c for c in [
+                        "コード", "銘柄名", "方向", "当日数量", "TR損益", "評価損益差分",
+                    ] if c in unchanged.columns]
+                    st.dataframe(format_display_table(unchanged[unch_cols]), width="stretch", hide_index=True)
+
+            # CSV
+            render_download("アクション詳細CSVダウンロード", filtered, f"actions_{selected_date}.csv")
 
 with tab_compare:
     if not snapshot_dates:

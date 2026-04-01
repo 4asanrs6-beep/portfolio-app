@@ -107,6 +107,8 @@ def compare_snapshots(current_df: pd.DataFrame, previous_df: pd.DataFrame) -> pd
             "unrealized_pl": "unrealized_pl_curr",
             "realized_pl": "realized_pl_curr",
             "tr_pl": "tr_pl_curr",
+            "book_price": "book_price_curr",
+            "last_price": "last_price_curr",
         }
     )
     previous = previous_df.copy().rename(
@@ -118,6 +120,8 @@ def compare_snapshots(current_df: pd.DataFrame, previous_df: pd.DataFrame) -> pd
             "unrealized_pl": "unrealized_pl_prev",
             "realized_pl": "realized_pl_prev",
             "tr_pl": "tr_pl_prev",
+            "book_price": "book_price_prev",
+            "last_price": "last_price_prev",
         }
     )
     merged = current.merge(previous, on=COMPARE_KEYS, how="outer")
@@ -128,12 +132,16 @@ def compare_snapshots(current_df: pd.DataFrame, previous_df: pd.DataFrame) -> pd
         "unrealized_pl_curr",
         "realized_pl_curr",
         "tr_pl_curr",
+        "book_price_curr",
+        "last_price_curr",
         "net_qty_prev",
         "market_value_prev",
         "net_pl_prev",
         "unrealized_pl_prev",
         "realized_pl_prev",
         "tr_pl_prev",
+        "book_price_prev",
+        "last_price_prev",
     ]:
         if column not in merged.columns:
             merged[column] = 0
@@ -149,53 +157,61 @@ def compare_snapshots(current_df: pd.DataFrame, previous_df: pd.DataFrame) -> pd
     merged["direction"] = merged["direction_curr"].fillna(merged["direction_prev"]).fillna("フラット")
     merged["quantity_change"] = merged["net_qty_prev"].astype(int).astype(str) + " -> " + merged["net_qty_curr"].astype(int).astype(str)
 
+    # 勝敗判定: TR損益差分がプラスなら勝ち
+    def _judge(row):
+        tr = row["tr_pl_diff"]
+        if tr > 0:
+            return "Win"
+        elif tr < 0:
+            return "Lose"
+        return "Even"
+
+    merged["result"] = merged.apply(_judge, axis=1)
+
+    cols = [
+        "action_type", "result",
+        "id_name", "code", "name", "account_category", "product_type",
+        "direction", "quantity_change",
+        "net_qty_prev", "net_qty_curr", "qty_diff",
+        "book_price_prev", "book_price_curr",
+        "last_price_prev", "last_price_curr",
+        "market_value_prev", "market_value_curr", "market_value_diff",
+        "tr_pl_curr", "tr_pl_diff",
+        "realized_pl_diff", "unrealized_pl_diff",
+        "net_pl_prev", "net_pl_curr", "net_pl_diff",
+    ]
+    available = [c for c in cols if c in merged.columns]
+
     return (
-        merged[
-            [
-                "action_type",
-                "id_name",
-                "code",
-                "name",
-                "account_category",
-                "product_type",
-                "direction",
-                "quantity_change",
-                "net_qty_prev",
-                "net_qty_curr",
-                "qty_diff",
-                "market_value_prev",
-                "market_value_curr",
-                "market_value_diff",
-                "net_pl_prev",
-                "net_pl_curr",
-                "net_pl_diff",
-                "unrealized_pl_diff",
-                "realized_pl_diff",
-                "tr_pl_diff",
-            ]
-        ]
+        merged[available]
         .rename(
             columns={
                 "action_type": "当日アクション",
+                "result": "勝敗",
                 "id_name": "ID名",
                 "code": "コード",
                 "name": "銘柄名",
                 "account_category": "口座区分",
                 "product_type": "商品区分",
                 "direction": "方向",
-                "quantity_change": "前日数量 -> 当日数量",
-                "net_qty_prev": "前日ネット数量",
-                "net_qty_curr": "当日ネット数量",
+                "quantity_change": "数量変化",
+                "net_qty_prev": "前日数量",
+                "net_qty_curr": "当日数量",
                 "qty_diff": "数量差分",
-                "market_value_prev": "前日評価額(円貨)",
-                "market_value_curr": "当日評価額(円貨)",
+                "book_price_prev": "前日簿価",
+                "book_price_curr": "当日簿価",
+                "last_price_prev": "前日時価",
+                "last_price_curr": "当日時価",
+                "market_value_prev": "前日評価額",
+                "market_value_curr": "当日評価額",
                 "market_value_diff": "評価額差分",
+                "tr_pl_curr": "TR損益",
+                "tr_pl_diff": "TR損益差分",
+                "realized_pl_diff": "実現損益差分",
+                "unrealized_pl_diff": "評価損益差分",
                 "net_pl_prev": "前日損益",
                 "net_pl_curr": "当日損益",
                 "net_pl_diff": "損益差分",
-                "unrealized_pl_diff": "評価損益差分",
-                "realized_pl_diff": "実現損益差分",
-                "tr_pl_diff": "TR損益差分",
             }
         )
         .sort_values(["当日アクション", "ID名", "コード"], kind="stable")
@@ -206,13 +222,24 @@ def compare_snapshots(current_df: pd.DataFrame, previous_df: pd.DataFrame) -> pd
 def build_action_summary(compared_df: pd.DataFrame) -> pd.DataFrame:
     if compared_df.empty:
         return pd.DataFrame(columns=["当日アクション", "件数"])
-    return (
-        compared_df["当日アクション"]
-        .value_counts()
-        .rename_axis("当日アクション")
-        .reset_index(name="件数")
-        .sort_values(["件数", "当日アクション"], ascending=[False, True], kind="stable")
+
+    summary = (
+        compared_df.groupby("当日アクション", dropna=False)
+        .agg(
+            件数=("コード", "count"),
+            Win=("勝敗", lambda x: (x == "Win").sum()),
+            Lose=("勝敗", lambda x: (x == "Lose").sum()),
+            Even=("勝敗", lambda x: (x == "Even").sum()),
+            TR損益合計=("TR損益差分", "sum"),
+            実現損益合計=("実現損益差分", "sum"),
+        )
+        .reset_index()
     )
+    summary["勝率"] = summary.apply(
+        lambda r: f"{r['Win'] / (r['Win'] + r['Lose']) * 100:.0f}%" if (r["Win"] + r["Lose"]) > 0 else "-",
+        axis=1,
+    )
+    return summary.sort_values(["件数", "当日アクション"], ascending=[False, True], kind="stable")
 
 
 def build_daily_trend(df: pd.DataFrame) -> pd.DataFrame:
