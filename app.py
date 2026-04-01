@@ -970,7 +970,7 @@ with tab_market:
                     chg = compute_price_changes(jq_client, code)
                     if chg:
                         chg_rows.append({
-                            "コード": code.rstrip("0") if len(code) == 5 else code,
+                            "コード": code[:4] if len(code) == 5 and code.isdigit() else code,
                             "前日比(%)": chg.get("前日比"),
                             "1W(%)": chg.get("1W"),
                             "1M(%)": chg.get("1M"),
@@ -992,7 +992,7 @@ with tab_market:
                         if not mdf.empty:
                             lat = mdf.iloc[-1]
                             margin_rows.append({
-                                "コード": code.rstrip("0") if is_equity_code(code) and len(code) == 5 else code,
+                                "コード": code[:4] if is_equity_code(code) and len(code) == 5 else code,
                                 "貸借倍率": lat.get("貸借倍率"),
                                 "買残増減(%)": lat.get("買残増減率(%)"),
                             })

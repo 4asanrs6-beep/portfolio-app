@@ -236,7 +236,11 @@ class JQuantsClient:
 
         import yfinance as yf
 
-        ticker = code if code.endswith(".T") else f"{code.rstrip('0')}.T"
+        # 5桁コード (J-Quants形式: 72030) → 4桁 (7203) に変換
+        c = code.strip()
+        if len(c) == 5 and c.isdigit():
+            c = c[:4]
+        ticker = c if c.endswith(".T") else f"{c}.T"
         try:
             info = yf.Ticker(ticker).info
         except Exception as e:
@@ -412,7 +416,7 @@ def fetch_portfolio_stock_info(
             continue
         info = client.get_stock_info(code)
         if info:
-            info["コード"] = code.rstrip("0") if len(code) == 5 else code
+            info["コード"] = code[:4] if len(code) == 5 and code.isdigit() else code
             rows.append(info)
     if not rows:
         return pd.DataFrame()
