@@ -25,10 +25,34 @@ BENCHMARK_LABELS = {
 def is_equity_code(code: str) -> bool:
     """通常の個別株コード (4〜5桁数字) かどうかを判定。先物・指数等を除外。"""
     c = str(code).strip()
-    # 4桁 or 5桁の数字のみが個別株
     if not c.isdigit():
         return False
     return 4 <= len(c) <= 5
+
+
+def classify_futures(code: str, name: str) -> str | None:
+    """先物の銘柄名から種別を推定。None なら不明。"""
+    n = str(name).upper()
+    if any(k in n for k in ["TOPIX", "トピックス", "TP", "TOPS"]):
+        return "TOPIX"
+    if any(k in n for k in ["日経", "NK", "N225", "NI225", "ミニ日経", "MIN"]):
+        return "NK225"
+    # MiN = ミニ日経, MiT = ミニTOPIX 等のコード体系
+    n_lower = str(name)
+    if n_lower.startswith("MiT") or n_lower.startswith("ToS"):
+        return "TOPIX"
+    if n_lower.startswith("MiN") or n_lower.startswith("NiK"):
+        return "NK225"
+    return None
+
+
+# 先物の想定ベータ
+FUTURES_BETA: dict[str, dict[str, float]] = {
+    "TOPIX": {"β(TOPIX)": 1.0, "β(T3M)": 1.0, "β(T6M)": 1.0, "β(T12M)": 1.0,
+              "β(N3M)": None, "β(N6M)": None, "β(N12M)": None},
+    "NK225": {"β(TOPIX)": None, "β(T3M)": None, "β(T6M)": None, "β(T12M)": None,
+              "β(N3M)": 1.0, "β(N6M)": 1.0, "β(N12M)": 1.0},
+}
 
 
 # ---------------------------------------------------------------------------
@@ -769,14 +793,22 @@ def compute_portfolio_all(
     for _, row in unique_codes.iterrows():
         code = row["code"]
         if not is_equity_code(code):
-            # 先物・指数等はベータ計算不可 → ウェイト情報だけ残す
-            stock_rows.append({
+            # 先物・指数等 → 種別からベータを割り当て
+            entry = {
                 "コード": code,
                 "銘柄名": row["name"],
                 "方向": row["direction"],
                 "ウェイト(%)": round(row["weight_pct"], 2),
                 "絶対ウェイト(%)": round(row["abs_weight_pct"], 2),
-            })
+            }
+            fut_type = classify_futures(code, row["name"])
+            if fut_type and fut_type in FUTURES_BETA:
+                for k, v in FUTURES_BETA[fut_type].items():
+                    entry[k] = v
+                entry["備考"] = f"{fut_type}先物 β=1.0"
+            else:
+                entry["備考"] = "先物(種別不明)"
+            stock_rows.append(entry)
             continue
         try:
             stock_df = client.get_stock_prices(code, longest_start, end_str)

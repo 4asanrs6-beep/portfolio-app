@@ -688,14 +688,33 @@ with tab_market:
         st.markdown("## ポートフォリオ全体")
 
         if not weighted.empty:
-            # ポジション金額 (API 不要)
-            mv = pd.to_numeric(weighted["position_market_value_jpy"], errors="coerce").fillna(0)
+            # ポジション金額 (API 不要) — 株式 / 先物を分離
+            w = weighted.copy()
+            w["_is_eq"] = w["code"].apply(is_equity_code)
+            mv = pd.to_numeric(w["position_market_value_jpy"], errors="coerce").fillna(0)
+
+            # 全体
             gross_actual = mv.abs().sum()
             net_actual = mv.sum()
             long_mv = mv[mv > 0].sum()
             short_mv = mv[mv < 0].sum()
             long_count = int((mv > 0).sum())
             short_count = int((mv < 0).sum())
+
+            # 株式のみ
+            eq_mv = mv[w["_is_eq"]]
+            eq_gross = eq_mv.abs().sum()
+            eq_net = eq_mv.sum()
+            eq_long = eq_mv[eq_mv > 0].sum()
+            eq_short = eq_mv[eq_mv < 0].sum()
+            eq_long_cnt = int((eq_mv > 0).sum())
+            eq_short_cnt = int((eq_mv < 0).sum())
+
+            # 先物のみ
+            fut_mv = mv[~w["_is_eq"]]
+            fut_gross = fut_mv.abs().sum()
+            fut_net = fut_mv.sum()
+            fut_count = int((~w["_is_eq"]).sum())
 
             with st.spinner(f"全銘柄のベータ・指標を取得中 (TOPIX & 日経平均 / {beta_period_label})..."):
                 try:
@@ -709,21 +728,31 @@ with tab_market:
             <table class="dash-table">
               <caption>ポジション概要</caption>
               <tr>
-                <th></th><th>ロング</th><th>ショート</th><th>ネット</th><th>グロス</th>
+                <th></th><th>ロング</th><th>ショート</th><th>ネット</th><th>グロス</th><th>銘柄数</th>
               </tr>
               <tr>
-                <td>評価額</td>
+                <td>株式</td>
+                <td>{_colored(eq_long, "円")}</td>
+                <td>{_colored(eq_short, "円")}</td>
+                <td>{_colored(eq_net, "円")}</td>
+                <td>{format_number(eq_gross)}円</td>
+                <td>{eq_long_cnt + eq_short_cnt} (L{eq_long_cnt} / S{eq_short_cnt})</td>
+              </tr>
+              <tr>
+                <td>先物</td>
+                <td>{_colored(fut_mv[fut_mv > 0].sum() if len(fut_mv[fut_mv > 0]) else 0, "円")}</td>
+                <td>{_colored(fut_mv[fut_mv < 0].sum() if len(fut_mv[fut_mv < 0]) else 0, "円")}</td>
+                <td>{_colored(fut_net, "円")}</td>
+                <td>{format_number(fut_gross)}円</td>
+                <td>{fut_count}</td>
+              </tr>
+              <tr style="font-weight:800; border-top:2px solid rgba(180,83,9,0.2)">
+                <td>合計</td>
                 <td>{_colored(long_mv, "円")}</td>
                 <td>{_colored(short_mv, "円")}</td>
                 <td>{_colored(net_actual, "円")}</td>
                 <td>{format_number(gross_actual)}円</td>
-              </tr>
-              <tr>
-                <td>銘柄数</td>
-                <td>{long_count}</td>
-                <td>{short_count}</td>
                 <td>{long_count + short_count}</td>
-                <td class="val-muted">-</td>
               </tr>
             </table>
             """, unsafe_allow_html=True)
@@ -751,7 +780,7 @@ with tab_market:
             if pr:
                 st.markdown(f"""
                 <table class="dash-table">
-                  <caption>加重ベータ (3M / 6M / 12M)</caption>
+                  <caption>加重ベータ — 株式のみ (3M / 6M / 12M)</caption>
                   <tr>
                     <th></th><th>3ヶ月</th><th>6ヶ月</th><th>12ヶ月</th><th>L/S内訳({beta_period_label})</th>
                   </tr>
@@ -841,9 +870,9 @@ with tab_market:
                   <tr>
                     <td>先物枠</td>
                     <td>{format_number(f_lim)}円</td>
-                    <td class="val-muted">-</td>
-                    <td class="val-muted">-</td>
-                    <td class="val-muted">-</td>
+                    <td>{format_number(fut_gross)}円</td>
+                    <td>{_usage(fut_gross, rl['futures_limit'])}</td>
+                    <td>{format_number(f_lim - fut_gross)}円</td>
                   </tr>
                   <tr>
                     <td>月間損失限度</td>
@@ -858,6 +887,7 @@ with tab_market:
                 for label, actual_val, limit_val in [
                     ("グロス消化率", gross_actual, rl["gross_limit"]),
                     ("ネット消化率", abs(net_actual), rl["net_limit"]),
+                    ("先物枠消化率", fut_gross, rl["futures_limit"]),
                 ]:
                     if limit_val and limit_val > 0:
                         ratio = min(actual_val / limit_val, 1.0)
@@ -867,9 +897,9 @@ with tab_market:
             copy_lines = [
                 f"ポートフォリオ概要 ({market_date} / {beta_period_label})",
                 "",
-                f"ロング評価額: {format_number(long_mv)}円 ({long_count}銘柄)",
-                f"ショート評価額: {format_number(short_mv)}円 ({short_count}銘柄)",
-                f"ネット評価額: {format_number(net_actual)}円 / グロス: {format_number(gross_actual)}円",
+                f"[株式] L: {format_number(eq_long)}円({eq_long_cnt}) / S: {format_number(eq_short)}円({eq_short_cnt}) / Net: {format_number(eq_net)}円 / Gross: {format_number(eq_gross)}円",
+                f"[先物] Net: {format_number(fut_net)}円 / Gross: {format_number(fut_gross)}円 ({fut_count}銘柄)",
+                f"[合計] L: {format_number(long_mv)}円 / S: {format_number(short_mv)}円 / Net: {format_number(net_actual)}円 / Gross: {format_number(gross_actual)}円",
             ]
             if pr:
                 copy_lines += [
@@ -884,7 +914,8 @@ with tab_market:
                     f"--- リスク枠 ({rl['month']}) ---",
                     f"グロス: {format_number(gross_actual)} / {format_number(g_lim)}円 ({_usage(gross_actual, rl['gross_limit'])})",
                     f"ネット: {format_number(abs(net_actual))} / {format_number(n_lim)}円 ({_usage(abs(net_actual), rl['net_limit'])})",
-                    f"先物枠: {format_number(f_lim)}円 / 損失限度: {format_number(l_lim)}円",
+                    f"先物枠: {format_number(fut_gross)} / {format_number(f_lim)}円 ({_usage(fut_gross, rl['futures_limit'])})",
+                    f"損失限度: {format_number(l_lim)}円",
                 ]
             copy_text = "\n".join(copy_lines)
             st.text_area("コピー用サマリ", value=copy_text, height=280, key="portfolio_copy")
