@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import date
 
 import pandas as pd
@@ -17,16 +18,40 @@ from portfolio_app.analytics import (
 )
 from portfolio_app.db import (
     init_db,
+    list_risk_limit_months,
     list_snapshot_dates,
     list_snapshot_months,
     load_all_snapshots,
     load_instrument_history,
+    load_latest_risk_limits,
     load_previous_snapshot,
+    load_risk_limits,
     load_snapshot,
     load_snapshots_by_month,
     replace_snapshot,
+    save_risk_limits,
+)
+from portfolio_app.market_data import (
+    BENCHMARK_LABELS,
+    JQuantsClient,
+    compute_multi_period_metrics,
+    compute_portfolio_all,
+    compute_portfolio_weights,
+    compute_price_chart_data,
+    compute_rolling_beta,
+    compute_sector_breakdown,
+    compute_price_changes,
+    enrich_portfolio_with_market_info,
+    fetch_portfolio_stock_info,
 )
 from portfolio_app.parser import parse_positions, split_blocks
+
+# .env ファイルがあれば読み込む
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 
 st.set_page_config(page_title="日本株ポジション管理", layout="wide")
@@ -50,7 +75,7 @@ DISPLAY_RENAME = {
     "realized_pl": "実現損益",
     "unrealized_pl": "評価損益",
     "net_qty": "ネット数量",
-    "position_market_value": "ポジション時価総額",
+    "position_market_value": "ポジション評価額",
     "net_pl_rate": "ネット損益率",
     "book_value_net": "簿価総額ネット",
     "buy_qty": "買数量",
@@ -90,8 +115,8 @@ DISPLAY_RENAME = {
     "today_tr_pl_ev": "当日TR損益(EV)",
     "today_tr_pl_jpy": "当日TR損益(円貨)",
     "today_tr_pl_foreign": "当日TR損益(外貨)",
-    "position_market_value_jpy": "ポジション時価総額(円貨)",
-    "position_market_value_foreign": "ポジション時価総額(外貨)",
+    "position_market_value_jpy": "ポジション評価額(円貨)",
+    "position_market_value_foreign": "ポジション評価額(外貨)",
     "base_fx_rate": "基準為替レート",
     "live_fx_rate": "リアル為替レート",
     "fx_book_rate": "為替簿価",
@@ -113,7 +138,7 @@ PREVIEW_COLUMNS = [
     "実現損益",
     "評価損益",
     "ネット数量",
-    "ポジション時価総額",
+    "ポジション評価額",
     "ネット損益率",
     "簿価総額ネット",
     "買数量",
@@ -275,8 +300,112 @@ CSS = """
   border-radius: 22px;
   overflow: hidden;
 }
+
+/* ---- Dashboard Table ---- */
+.dash-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  background: linear-gradient(180deg, rgba(255,255,255,0.96), rgba(255,250,243,0.90));
+  border: 1px solid rgba(180,83,9,0.12);
+  border-radius: 20px;
+  overflow: hidden;
+  box-shadow: 0 12px 32px rgba(120,53,15,0.07);
+  margin-bottom: 1.2rem;
+  font-size: 0.92rem;
+}
+.dash-table caption {
+  caption-side: top;
+  text-align: left;
+  font-weight: 800;
+  font-size: 1.05rem;
+  color: var(--accent-deep);
+  padding: 1rem 1.2rem 0.5rem;
+  letter-spacing: 0.02em;
+}
+.dash-table th {
+  background: rgba(180,83,9,0.07);
+  color: var(--muted);
+  font-weight: 700;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 0.6rem 1rem;
+  text-align: right;
+  border-bottom: 1px solid rgba(180,83,9,0.10);
+}
+.dash-table th:first-child { text-align: left; }
+.dash-table td {
+  padding: 0.65rem 1rem;
+  text-align: right;
+  color: var(--ink);
+  border-bottom: 1px solid rgba(148,163,184,0.12);
+  font-variant-numeric: tabular-nums;
+}
+.dash-table td:first-child {
+  text-align: left;
+  font-weight: 700;
+  color: var(--accent-deep);
+}
+.dash-table tr:last-child td { border-bottom: none; }
+.dash-table tr:hover td { background: rgba(250,204,21,0.06); }
+.dash-table .val-pos { color: #15803d; }
+.dash-table .val-neg { color: #dc2626; }
+.dash-table .val-muted { color: var(--muted); font-size: 0.82rem; }
+
+.dash-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 0.8rem;
+  margin-bottom: 1.2rem;
+}
+.dash-kpi {
+  background: linear-gradient(180deg, rgba(255,255,255,0.96), rgba(255,250,243,0.88));
+  border: 1px solid rgba(180,83,9,0.12);
+  border-radius: 18px;
+  padding: 0.9rem 1rem;
+  box-shadow: 0 8px 20px rgba(120,53,15,0.06);
+}
+.dash-kpi-label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  font-weight: 700;
+  margin-bottom: 0.2rem;
+}
+.dash-kpi-value {
+  font-size: 1.4rem;
+  font-weight: 800;
+  color: var(--accent-deep);
+  font-variant-numeric: tabular-nums;
+}
+.dash-kpi-sub {
+  font-size: 0.76rem;
+  color: var(--muted);
+  margin-top: 0.15rem;
+}
 </style>
 """
+
+
+def _v(value, suffix: str = "", fallback: str = "-") -> str:
+    """ダッシュボード表示用フォーマッタ。"""
+    if value is None or value == "-":
+        return fallback
+    return f"{value}{suffix}"
+
+
+def _colored(value, suffix: str = "") -> str:
+    """正負で色分けした HTML span を返す。"""
+    if value is None or value == "-":
+        return '<span class="val-muted">-</span>'
+    try:
+        v = float(value)
+    except (ValueError, TypeError):
+        return f"{value}{suffix}"
+    cls = "val-pos" if v > 0 else "val-neg" if v < 0 else ""
+    return f'<span class="{cls}">{format_number(v)}{suffix}</span>'
 
 
 def inject_theme() -> None:
@@ -337,15 +466,15 @@ def render_download(label: str, df: pd.DataFrame, filename: str) -> None:
 
 def render_table(df: pd.DataFrame, filename: str | None = None, download_label: str | None = None) -> None:
     display_df = format_display_table(df)
-    st.dataframe(display_df, use_container_width=True, hide_index=True)
+    st.dataframe(display_df, width="stretch", hide_index=True)
     if filename and download_label:
         render_download(download_label, df, filename)
 
 
 inject_theme()
 
-tab_import, tab_summary, tab_trend, tab_actions, tab_compare, tab_symbol, tab_monthly, tab_history = st.tabs(
-    ["取込", "日次サマリ", "推移", "当日アクション", "前日比較", "銘柄分析", "月次", "履歴"]
+tab_import, tab_summary, tab_trend, tab_actions, tab_compare, tab_symbol, tab_market, tab_limits, tab_monthly, tab_history = st.tabs(
+    ["取込", "日次サマリ", "推移", "当日アクション", "前日比較", "銘柄分析", "マーケット指標", "リスク枠", "月次", "履歴"]
 )
 
 with tab_import:
@@ -394,13 +523,33 @@ with tab_summary:
         c1.metric("TR損益", metric_sum(display_df, "TR損益"))
         c2.metric("実現損益", metric_sum(display_df, "実現損益"))
         c3.metric("評価損益", metric_sum(display_df, "評価損益"))
-        c4.metric("時価総額(円貨)", metric_sum(display_df, "ポジション時価総額(円貨)"))
+        c4.metric("評価額(円貨)", metric_sum(display_df, "ポジション評価額(円貨)"))
 
         left, right = st.columns(2)
         with left:
             render_table(direction_summary, f"summary_direction_{selected_date}.csv", "方向別サマリCSV")
         with right:
             render_table(category_summary, f"summary_account_{selected_date}.csv", "口座別サマリCSV")
+
+        # --- リスク枠消化状況 ---
+        summary_month = selected_date[:7]
+        summary_rl = load_latest_risk_limits(summary_month)
+        if summary_rl and not snapshot_df.empty:
+            mv_series = pd.to_numeric(snapshot_df["position_market_value_jpy"], errors="coerce").fillna(0)
+            s_gross = mv_series.abs().sum()
+            s_net = mv_series.sum()
+
+            st.markdown("##### リスク枠消化状況")
+            sl1, sl2, sl3, sl4 = st.columns(4)
+            sl1.metric("グロス", f"{format_number(s_gross)}円", delta=f"上限 {format_number(summary_rl['gross_limit'] or 0)}円")
+            sl2.metric("ネット", f"{format_number(abs(s_net))}円", delta=f"上限 {format_number(summary_rl['net_limit'] or 0)}円")
+            sl3.metric("先物枠", f"{format_number(summary_rl['futures_limit'] or 0)}円")
+            sl4.metric("損失限度", f"{format_number(summary_rl['monthly_loss_limit'] or 0)}円")
+
+            for s_label, s_actual, s_limit in [("グロス", s_gross, summary_rl["gross_limit"]), ("ネット", abs(s_net), summary_rl["net_limit"])]:
+                if s_limit and s_limit > 0:
+                    s_ratio = min(s_actual / s_limit, 1.0)
+                    st.progress(s_ratio, text=f"{s_label}: {format_number(s_actual)} / {format_number(s_limit)} ({s_ratio * 100:.1f}%)")
 
         shown = [column for column in PREVIEW_COLUMNS if column in display_df.columns]
         render_table(display_df[shown], f"snapshot_{selected_date}.csv", "日次一覧CSV")
@@ -423,10 +572,10 @@ with tab_trend:
         c1.metric("最新TR損益", format_number(view_df["TR損益"].iloc[-1], "TR損益"))
         c2.metric("最新実現損益", format_number(view_df["実現損益"].iloc[-1], "実現損益"))
         c3.metric("最新評価損益", format_number(view_df["評価損益"].iloc[-1], "評価損益"))
-        c4.metric("最新時価総額(円貨)", format_number(view_df["時価総額(円貨)"].iloc[-1], "時価総額(円貨)"))
+        c4.metric("最新評価額(円貨)", format_number(view_df["評価額(円貨)"].iloc[-1], "評価額(円貨)"))
 
-        st.line_chart(view_df.set_index("snapshot_date")[["TR損益", "実現損益", "評価損益", "損益"]], use_container_width=True)
-        st.line_chart(view_df.set_index("snapshot_date")[["時価総額(円貨)"]], use_container_width=True)
+        st.line_chart(view_df.set_index("snapshot_date")[["TR損益", "実現損益", "評価損益", "損益"]], width="stretch")
+        st.line_chart(view_df.set_index("snapshot_date")[["評価額(円貨)"]], width="stretch")
 
         display_trend = view_df.copy()
         display_trend["snapshot_date"] = display_trend["snapshot_date"].dt.strftime("%Y-%m-%d")
@@ -483,11 +632,673 @@ with tab_symbol:
         if timeline_df.empty:
             st.info("この銘柄の履歴はありません。")
         else:
-            st.line_chart(timeline_df.set_index("snapshot_date")[["評価損益", "実現損益", "TR損益", "損益"]], use_container_width=True)
-            st.line_chart(timeline_df.set_index("snapshot_date")[["ネット数量", "時価総額(円貨)"]], use_container_width=True)
+            st.line_chart(timeline_df.set_index("snapshot_date")[["評価損益", "実現損益", "TR損益", "損益"]], width="stretch")
+            st.line_chart(timeline_df.set_index("snapshot_date")[["ネット数量", "評価額(円貨)"]], width="stretch")
             display_timeline = timeline_df.copy()
             display_timeline["snapshot_date"] = display_timeline["snapshot_date"].dt.strftime("%Y-%m-%d")
             render_table(display_timeline, f"timeline_{selected_code}.csv", "銘柄時系列CSV")
+
+with tab_market:
+    jquants_api_key = os.getenv("JQUANTS_API_KEY", "")
+    with st.expander("J-Quants API 設定", expanded=not bool(jquants_api_key)):
+        api_key_input = st.text_input(
+            "API Key",
+            value=jquants_api_key,
+            type="password",
+            help="https://jpx-jquants.com/ で取得した API キーを入力してください。環境変数 JQUANTS_API_KEY でも設定できます。",
+        )
+        if api_key_input:
+            jquants_api_key = api_key_input
+
+    if not jquants_api_key:
+        st.info("J-Quants API キーを設定するとポートフォリオ銘柄のヒストリカルベータ等を表示できます。")
+    elif not snapshot_dates:
+        st.info("ポジションデータがありません。先に「取込」タブからデータを保存してください。")
+    else:
+        # session_state にクライアントを保持してキャッシュを活かす
+        if "jq_client" not in st.session_state or st.session_state.get("jq_api_key") != jquants_api_key:
+            st.session_state["jq_client"] = JQuantsClient(api_key=jquants_api_key)
+            st.session_state["jq_api_key"] = jquants_api_key
+        jq_client = st.session_state["jq_client"]
+
+        # --- 設定 ---
+        col_date, col_period = st.columns(2)
+        with col_date:
+            market_date = st.selectbox("対象日", snapshot_dates, key="market_date")
+        with col_period:
+            beta_period_label = st.selectbox(
+                "指標の算出期間",
+                ["3ヶ月", "6ヶ月", "1年", "2年"],
+                index=2,
+                key="beta_period",
+            )
+        beta_days = {"3ヶ月": 90, "6ヶ月": 180, "1年": 365, "2年": 730}[beta_period_label]
+
+        market_snapshot = load_snapshot(market_date)
+
+        # --- セクター情報付与 & ウェイト計算 ---
+        with st.spinner("銘柄マスタ・ウェイト計算中..."):
+            enriched = enrich_portfolio_with_market_info(market_snapshot, jq_client)
+            weighted = compute_portfolio_weights(enriched)
+
+        # ================================================================
+        # ポートフォリオ全体ビュー
+        # ================================================================
+        st.markdown("## ポートフォリオ全体")
+
+        if not weighted.empty:
+            # ポジション金額 (API 不要)
+            mv = pd.to_numeric(weighted["position_market_value_jpy"], errors="coerce").fillna(0)
+            gross_actual = mv.abs().sum()
+            net_actual = mv.sum()
+            long_mv = mv[mv > 0].sum()
+            short_mv = mv[mv < 0].sum()
+            long_count = int((mv > 0).sum())
+            short_count = int((mv < 0).sum())
+
+            with st.spinner(f"全銘柄のベータ・指標を取得中 (TOPIX & 日経平均 / {beta_period_label})..."):
+                try:
+                    pr = compute_portfolio_all(jq_client, weighted, days=beta_days)
+                except Exception as e:
+                    pr = {}
+                    st.error(f"ポートフォリオ指標取得エラー: {e}")
+
+            # ---- ポジション概要テーブル ----
+            st.markdown(f"""
+            <table class="dash-table">
+              <caption>ポジション概要</caption>
+              <tr>
+                <th></th><th>ロング</th><th>ショート</th><th>ネット</th><th>グロス</th>
+              </tr>
+              <tr>
+                <td>評価額</td>
+                <td>{_colored(long_mv, "円")}</td>
+                <td>{_colored(short_mv, "円")}</td>
+                <td>{_colored(net_actual, "円")}</td>
+                <td>{format_number(gross_actual)}円</td>
+              </tr>
+              <tr>
+                <td>銘柄数</td>
+                <td>{long_count}</td>
+                <td>{short_count}</td>
+                <td>{long_count + short_count}</td>
+                <td class="val-muted">-</td>
+              </tr>
+            </table>
+            """, unsafe_allow_html=True)
+
+            # ---- 銘柄情報 (時価総額・バリュエーション・出来高) ----
+            unique_codes = weighted["code"].unique().tolist()
+            with st.spinner("yfinance から銘柄情報を取得中..."):
+                stock_info_df = fetch_portfolio_stock_info(jq_client, unique_codes)
+            if not stock_info_df.empty:
+                if "時価総額" in stock_info_df.columns:
+                    stock_info_df["時価総額(億円)"] = stock_info_df["時価総額"].apply(
+                        lambda x: f"{x / 1e8:,.0f}" if x else "-"
+                    )
+                display_cols = [c for c in [
+                    "コード", "時価総額(億円)", "株価", "β(Yahoo)",
+                    "PER(実績)", "PER(予想)", "PBR", "配当利回り(%)",
+                    "出来高", "平均出来高(3M)", "出来高倍率",
+                    "機関投資家保有率(%)", "内部者保有率(%)",
+                    "52週高値", "52週安値",
+                ] if c in stock_info_df.columns]
+                st.markdown("### 銘柄情報")
+                st.dataframe(stock_info_df[display_cols], width="stretch", hide_index=True)
+
+            # ---- ベータ & リスク指標テーブル ----
+            if pr:
+                st.markdown(f"""
+                <table class="dash-table">
+                  <caption>加重ベータ (3M / 6M / 12M)</caption>
+                  <tr>
+                    <th></th><th>3ヶ月</th><th>6ヶ月</th><th>12ヶ月</th><th>L/S内訳({beta_period_label})</th>
+                  </tr>
+                  <tr>
+                    <td>β (TOPIX)</td>
+                    <td>{_v(pr.get('topix_beta_3M'))}</td>
+                    <td>{_v(pr.get('topix_beta_6M'))}</td>
+                    <td><b>{_v(pr.get('topix_beta_12M'))}</b></td>
+                    <td class="val-muted">L {_v(pr.get('topix_long_beta'))} / S {_v(pr.get('topix_short_beta'))}</td>
+                  </tr>
+                  <tr>
+                    <td>β (日経平均)</td>
+                    <td>{_v(pr.get('nikkei_beta_3M'))}</td>
+                    <td>{_v(pr.get('nikkei_beta_6M'))}</td>
+                    <td><b>{_v(pr.get('nikkei_beta_12M'))}</b></td>
+                    <td class="val-muted">L {_v(pr.get('nikkei_long_beta'))} / S {_v(pr.get('nikkei_short_beta'))}</td>
+                  </tr>
+                </table>
+                """, unsafe_allow_html=True)
+
+                st.markdown(f"""
+                <div class="dash-kpi-grid">
+                  <div class="dash-kpi">
+                    <div class="dash-kpi-label">ボラティリティ (年率)</div>
+                    <div class="dash-kpi-value">{_v(pr.get('weighted_vol'), '%')}</div>
+                  </div>
+                  <div class="dash-kpi">
+                    <div class="dash-kpi-label">シャープレシオ</div>
+                    <div class="dash-kpi-value">{_v(pr.get('weighted_sharpe'))}</div>
+                  </div>
+                  <div class="dash-kpi">
+                    <div class="dash-kpi-label">加重リターン</div>
+                    <div class="dash-kpi-value">{_v(pr.get('weighted_return'), '%')}</div>
+                  </div>
+                  <div class="dash-kpi">
+                    <div class="dash-kpi-label">上位3銘柄集中度</div>
+                    <div class="dash-kpi-value">{_v(pr.get('concentration_top3'), '%')}</div>
+                  </div>
+                  <div class="dash-kpi">
+                    <div class="dash-kpi-label">ベスト銘柄</div>
+                    <div class="dash-kpi-value" style="font-size:0.85rem">{pr.get('best_stock', '-')}</div>
+                  </div>
+                  <div class="dash-kpi">
+                    <div class="dash-kpi-label">ワースト銘柄</div>
+                    <div class="dash-kpi-value" style="font-size:0.85rem">{pr.get('worst_stock', '-')}</div>
+                  </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+                st.caption(f"算出期間: {beta_period_label} / 銘柄数: {pr.get('stock_count', 0)} / ベータはTOPIX・日経平均の両方で算出")
+
+            # ---- リスク枠消化状況 ----
+            current_month = market_date[:7]
+            rl = load_latest_risk_limits(current_month)
+
+            def _usage(actual: float, limit: float | None) -> str:
+                if limit is None or limit == 0:
+                    return "-"
+                return f"{actual / limit * 100:.1f}%"
+
+            if rl:
+                g_lim = rl["gross_limit"] or 0
+                n_lim = rl["net_limit"] or 0
+                f_lim = rl["futures_limit"] or 0
+                l_lim = rl["monthly_loss_limit"] or 0
+
+                st.markdown(f"""
+                <table class="dash-table">
+                  <caption>リスク枠消化状況 ({rl['month']})</caption>
+                  <tr>
+                    <th></th><th>上限</th><th>実績</th><th>消化率</th><th>残余</th>
+                  </tr>
+                  <tr>
+                    <td>グロス金額</td>
+                    <td>{format_number(g_lim)}円</td>
+                    <td>{format_number(gross_actual)}円</td>
+                    <td>{_usage(gross_actual, rl['gross_limit'])}</td>
+                    <td>{format_number(g_lim - gross_actual)}円</td>
+                  </tr>
+                  <tr>
+                    <td>ネット上限</td>
+                    <td>{format_number(n_lim)}円</td>
+                    <td>{format_number(abs(net_actual))}円</td>
+                    <td>{_usage(abs(net_actual), rl['net_limit'])}</td>
+                    <td>{format_number(n_lim - abs(net_actual))}円</td>
+                  </tr>
+                  <tr>
+                    <td>先物枠</td>
+                    <td>{format_number(f_lim)}円</td>
+                    <td class="val-muted">-</td>
+                    <td class="val-muted">-</td>
+                    <td class="val-muted">-</td>
+                  </tr>
+                  <tr>
+                    <td>月間損失限度</td>
+                    <td>{format_number(l_lim)}円</td>
+                    <td class="val-muted">-</td>
+                    <td class="val-muted">-</td>
+                    <td class="val-muted">-</td>
+                  </tr>
+                </table>
+                """, unsafe_allow_html=True)
+
+                for label, actual_val, limit_val in [
+                    ("グロス消化率", gross_actual, rl["gross_limit"]),
+                    ("ネット消化率", abs(net_actual), rl["net_limit"]),
+                ]:
+                    if limit_val and limit_val > 0:
+                        ratio = min(actual_val / limit_val, 1.0)
+                        st.progress(ratio, text=f"{label}: {format_number(actual_val)} / {format_number(limit_val)} ({ratio * 100:.1f}%)")
+
+            # ---- コピー用テキスト ----
+            copy_lines = [
+                f"ポートフォリオ概要 ({market_date} / {beta_period_label})",
+                "",
+                f"ロング評価額: {format_number(long_mv)}円 ({long_count}銘柄)",
+                f"ショート評価額: {format_number(short_mv)}円 ({short_count}銘柄)",
+                f"ネット評価額: {format_number(net_actual)}円 / グロス: {format_number(gross_actual)}円",
+            ]
+            if pr:
+                copy_lines += [
+                    "",
+                    f"β(TOPIX)  3M: {pr.get('topix_beta_3M', '-')}  6M: {pr.get('topix_beta_6M', '-')}  12M: {pr.get('topix_beta_12M', '-')}  L: {pr.get('topix_long_beta', '-')}  S: {pr.get('topix_short_beta', '-')}",
+                    f"β(日経)   3M: {pr.get('nikkei_beta_3M', '-')}  6M: {pr.get('nikkei_beta_6M', '-')}  12M: {pr.get('nikkei_beta_12M', '-')}",
+                    f"ボラティリティ(年率): {pr.get('weighted_vol', '-')}%  シャープ: {pr.get('weighted_sharpe', '-')}  リターン: {pr.get('weighted_return', '-')}%",
+                ]
+            if rl:
+                copy_lines += [
+                    "",
+                    f"--- リスク枠 ({rl['month']}) ---",
+                    f"グロス: {format_number(gross_actual)} / {format_number(g_lim)}円 ({_usage(gross_actual, rl['gross_limit'])})",
+                    f"ネット: {format_number(abs(net_actual))} / {format_number(n_lim)}円 ({_usage(abs(net_actual), rl['net_limit'])})",
+                    f"先物枠: {format_number(f_lim)}円 / 損失限度: {format_number(l_lim)}円",
+                ]
+            copy_text = "\n".join(copy_lines)
+            st.text_area("コピー用サマリ", value=copy_text, height=280, key="portfolio_copy")
+
+            # --- セクター構成 ---
+            sector_df = compute_sector_breakdown(weighted)
+            if not sector_df.empty:
+                st.markdown("### セクター構成")
+                left_sec, right_sec = st.columns([2, 3])
+                with left_sec:
+                    st.dataframe(sector_df, width="stretch", hide_index=True)
+                with right_sec:
+                    chart_data = sector_df.set_index("セクター")[["ウェイト"]]
+                    st.bar_chart(chart_data, width="stretch")
+
+            # --- 銘柄一覧 (統合テーブル) ---
+            st.markdown("### 銘柄一覧")
+
+            # ベース: ウェイト
+            unified = weighted[["code", "name", "direction", "net_qty", "position_market_value_jpy", "weight_pct"]].copy()
+            unified = unified.rename(columns={
+                "code": "コード", "name": "銘柄名", "direction": "方向",
+                "net_qty": "数量", "position_market_value_jpy": "評価額(円)",
+                "weight_pct": "ウェイト(%)",
+            })
+
+            # 時価総額・バリュエーション (stock_info_df は上で取得済み)
+            if not stock_info_df.empty:
+                info_cols = stock_info_df[["コード"]].copy()
+                if "時価総額(億円)" in stock_info_df.columns:
+                    info_cols["時価総額(億円)"] = stock_info_df["時価総額(億円)"]
+                for c in ["PER(予想)", "PBR", "配当利回り(%)", "出来高倍率"]:
+                    if c in stock_info_df.columns:
+                        info_cols[c] = stock_info_df[c]
+                unified = unified.merge(info_cols, on="コード", how="left")
+
+            # 騰落率
+            with st.spinner("全銘柄の騰落率を計算中..."):
+                chg_rows = []
+                for code in weighted["code"].unique():
+                    chg = compute_price_changes(jq_client, code)
+                    if chg:
+                        chg_rows.append({
+                            "コード": code.rstrip("0") if len(code) == 5 else code,
+                            "前日比(%)": chg.get("前日比"),
+                            "1W(%)": chg.get("1W"),
+                            "1M(%)": chg.get("1M"),
+                            "3M(%)": chg.get("3M"),
+                            "YTD(%)": chg.get("YTD"),
+                        })
+                if chg_rows:
+                    chg_df = pd.DataFrame(chg_rows)
+                    unified = unified.merge(chg_df, on="コード", how="left")
+
+            # 需給 (貸借倍率のみ)
+            with st.spinner("全銘柄の信用残を取得中..."):
+                margin_rows = []
+                for code in weighted["code"].unique():
+                    try:
+                        mdf = jq_client.get_margin_balance(code, weeks=4)
+                        if not mdf.empty:
+                            lat = mdf.iloc[-1]
+                            margin_rows.append({
+                                "コード": code.rstrip("0") if len(code) == 5 else code,
+                                "貸借倍率": lat.get("貸借倍率"),
+                                "買残増減(%)": lat.get("買残増減率(%)"),
+                            })
+                    except Exception:
+                        pass
+                if margin_rows:
+                    margin_summary = pd.DataFrame(margin_rows)
+                    unified = unified.merge(margin_summary, on="コード", how="left")
+
+            # ベータ (stock_metrics から主要列をマージ)
+            if pr and "stock_metrics" in pr:
+                sm = pr["stock_metrics"]
+                beta_cols = ["コード"]
+                for c in ["β(T3M)", "β(T6M)", "β(T12M)", "β(N3M)", "β(N6M)", "β(N12M)",
+                           "ボラティリティ(年率%)", "シャープレシオ", "期間リターン(%)", "最大DD(%)"]:
+                    if c in sm.columns:
+                        beta_cols.append(c)
+                unified = unified.merge(sm[beta_cols], on="コード", how="left")
+
+            st.dataframe(unified, width="stretch", hide_index=True)
+
+            csv_bytes = unified.to_csv(index=False).encode("utf-8-sig")
+            col_dl, col_cp = st.columns(2)
+            with col_dl:
+                st.download_button(
+                    "銘柄一覧CSVダウンロード",
+                    data=csv_bytes,
+                    file_name=f"portfolio_all_{market_date}.csv",
+                    mime="text/csv",
+                )
+            with col_cp:
+                tsv_text = unified.to_csv(index=False, sep="\t")
+                st.text_area("銘柄一覧 (コピー用TSV)", value=tsv_text, height=200, key="metrics_copy")
+
+        # ================================================================
+        # 個別銘柄ドリルダウン
+        # ================================================================
+        st.markdown("---")
+        st.markdown("## 個別銘柄ドリルダウン")
+
+        stock_codes = (
+            market_snapshot[["code", "name"]]
+            .drop_duplicates()
+            .sort_values(["code", "name"], kind="stable")
+            .assign(label=lambda x: x["code"] + " " + x["name"])
+        )
+
+        selected_label = st.selectbox("銘柄", stock_codes["label"].tolist(), key="market_code")
+        selected_code = selected_label.split(" ", 1)[0]
+        selected_name = selected_label.split(" ", 1)[1] if " " in selected_label else ""
+
+        st.markdown(f"### {selected_code} {selected_name}")
+
+        # ---- 銘柄情報 (yfinance) ----
+        with st.spinner("銘柄情報を取得中..."):
+            si = jq_client.get_stock_info(selected_code)
+
+        if si:
+            mcap = si.get("時価総額")
+            mcap_str = f"{mcap / 1e8:,.0f}億円" if mcap else "-"
+
+            st.markdown(f"""
+            <table class="dash-table">
+              <caption>銘柄情報</caption>
+              <tr><th>時価総額</th><th>株価</th><th>β(Yahoo)</th><th>PER(実績)</th><th>PER(予想)</th><th>PBR</th><th>配当利回り</th></tr>
+              <tr>
+                <td>{mcap_str}</td>
+                <td>{format_number(si.get('株価', 0))}円</td>
+                <td>{_v(si.get('β(Yahoo)'))}</td>
+                <td>{_v(si.get('PER(実績)'))}</td>
+                <td>{_v(si.get('PER(予想)'))}</td>
+                <td>{_v(si.get('PBR'))}</td>
+                <td>{_v(si.get('配当利回り(%)'), '%')}</td>
+              </tr>
+            </table>
+            """, unsafe_allow_html=True)
+
+            st.markdown(f"""
+            <table class="dash-table">
+              <caption>出来高・保有構造</caption>
+              <tr><th>出来高</th><th>平均出来高(3M)</th><th>出来高倍率</th><th>機関投資家</th><th>内部者</th><th>52週高値</th><th>52週安値</th></tr>
+              <tr>
+                <td>{format_number(si.get('出来高', 0))}</td>
+                <td>{format_number(si.get('平均出来高(3M)', 0))}</td>
+                <td>{_v(si.get('出来高倍率'), 'x')}</td>
+                <td>{_v(si.get('機関投資家保有率(%)'), '%')}</td>
+                <td>{_v(si.get('内部者保有率(%)'), '%')}</td>
+                <td>{format_number(si.get('52週高値', 0))}円</td>
+                <td>{format_number(si.get('52週安値', 0))}円</td>
+              </tr>
+            </table>
+            """, unsafe_allow_html=True)
+
+        # ---- 直近騰落率 ----
+        with st.spinner("騰落率を計算中..."):
+            price_chg = compute_price_changes(jq_client, selected_code)
+
+        if price_chg and len(price_chg) > 1:
+            current = price_chg.get("現在値", 0)
+            headers = ""
+            values = ""
+            for k in ["前日比", "1W", "1M", "3M", "6M", "YTD", "1Y"]:
+                v = price_chg.get(k)
+                if v is not None:
+                    headers += f"<th>{k}</th>"
+                    cls = "val-pos" if v > 0 else "val-neg" if v < 0 else ""
+                    sign = "+" if v > 0 else ""
+                    values += f'<td class="{cls}">{sign}{v}%</td>'
+
+            st.markdown(f"""
+            <table class="dash-table">
+              <caption>直近騰落率 (現在値: {format_number(current)}円)</caption>
+              <tr>{headers}</tr>
+              <tr>{values}</tr>
+            </table>
+            """, unsafe_allow_html=True)
+
+        # ---- 信用取引残高 (J-Quants) ----
+        with st.spinner("信用残データを取得中..."):
+            try:
+                margin_df = jq_client.get_margin_balance(selected_code)
+            except Exception as e:
+                margin_df = pd.DataFrame()
+                st.warning(f"信用残取得エラー: {e}")
+
+        if not margin_df.empty:
+            st.markdown("#### 信用取引残高 (週次推移)")
+            # 最新の数値をハイライト
+            latest = margin_df.iloc[-1]
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("買残", format_number(latest.get("買残", 0)))
+            m2.metric("売残", format_number(latest.get("売残", 0)))
+            m3.metric("貸借倍率", f"{latest.get('貸借倍率', '-')}x")
+            buy_chg = latest.get("買残増減率(%)")
+            m4.metric("買残増減率", f"{buy_chg}%" if buy_chg is not None and not pd.isna(buy_chg) else "-")
+
+            # チャート
+            if len(margin_df) > 1:
+                chart_margin = margin_df[["日付", "買残", "売残"]].set_index("日付")
+                st.line_chart(chart_margin, width="stretch")
+
+                if "貸借倍率" in margin_df.columns:
+                    ratio_chart = margin_df[["日付", "貸借倍率"]].dropna().set_index("日付")
+                    st.line_chart(ratio_chart, width="stretch")
+
+            # テーブル
+            display_margin = margin_df.copy()
+            display_margin["日付"] = display_margin["日付"].dt.strftime("%Y-%m-%d")
+            st.dataframe(display_margin, width="stretch", hide_index=True)
+
+        # 複数期間指標 (TOPIX & 日経平均 両方)
+        with st.spinner("期間別指標を計算中 (TOPIX & 日経平均)..."):
+            metrics_topix = pd.DataFrame()
+            metrics_nikkei = pd.DataFrame()
+            try:
+                metrics_topix = compute_multi_period_metrics(jq_client, selected_code, benchmark="TOPIX")
+            except Exception as e:
+                st.error(f"TOPIX指標エラー: {e}")
+            try:
+                metrics_nikkei = compute_multi_period_metrics(jq_client, selected_code, benchmark="日経平均")
+            except Exception as e:
+                st.error(f"日経平均指標エラー: {e}")
+
+        # ハイライト (TOPIX 1Y or最長)
+        if not metrics_topix.empty:
+            hl_period = "1Y" if "1Y" in metrics_topix.index else metrics_topix.index[-1]
+            ht = metrics_topix.loc[hl_period]
+            hn = metrics_nikkei.loc[hl_period] if not metrics_nikkei.empty and hl_period in metrics_nikkei.index else {}
+
+            c1, c2, c3, c4, c5, c6 = st.columns(6)
+            c1.metric("β (TOPIX)", f"{ht.get('ベータ', '-')}")
+            c2.metric("β (日経)", f"{hn.get('ベータ', '-') if hn else '-'}" if isinstance(hn, dict) else f"{hn.get('ベータ', '-')}" if hasattr(hn, 'get') else "-")
+            c3.metric("ボラティリティ", f"{ht.get('ボラティリティ(年率%)', '-')}%")
+            c4.metric("シャープレシオ", f"{ht.get('シャープレシオ', '-')}")
+            c5.metric("期間リターン", f"{ht.get('期間リターン(%)', '-')}%")
+            c6.metric("最大DD", f"{ht.get('最大ドローダウン(%)', '-')}%")
+            st.caption(f"上記は {hl_period} の値")
+
+        # 対TOPIX テーブル
+        if not metrics_topix.empty:
+            st.markdown("#### 期間別リスク指標 (対TOPIX)")
+            st.dataframe(metrics_topix, width="stretch")
+        # 対日経平均 テーブル
+        if not metrics_nikkei.empty:
+            st.markdown("#### 期間別リスク指標 (対日経平均)")
+            st.dataframe(metrics_nikkei, width="stretch")
+
+        # CSV ダウンロード (両方結合)
+        if not metrics_topix.empty or not metrics_nikkei.empty:
+            dfs_to_merge = []
+            if not metrics_topix.empty:
+                t = metrics_topix.reset_index().copy()
+                t.columns = [f"{c}(TOPIX)" if c != "期間" else c for c in t.columns]
+                dfs_to_merge.append(t)
+            if not metrics_nikkei.empty:
+                n = metrics_nikkei.reset_index().copy()
+                n.columns = [f"{c}(日経)" if c != "期間" else c for c in n.columns]
+                dfs_to_merge.append(n)
+            if len(dfs_to_merge) == 2:
+                combined = dfs_to_merge[0].merge(dfs_to_merge[1], on="期間", how="outer")
+            else:
+                combined = dfs_to_merge[0]
+            st.download_button(
+                "指標CSVダウンロード",
+                data=combined.to_csv(index=False).encode("utf-8-sig"),
+                file_name=f"metrics_{selected_code}.csv",
+                mime="text/csv",
+            )
+
+        # 株価 vs TOPIX & 日経平均
+        chart_period = st.selectbox(
+            "チャート期間", ["6ヶ月", "1年", "2年"], index=1, key="chart_period"
+        )
+        chart_days = {"6ヶ月": 180, "1年": 365, "2年": 730}[chart_period]
+
+        with st.spinner("チャートデータ取得中..."):
+            try:
+                chart_topix = compute_price_chart_data(jq_client, selected_code, days=chart_days, benchmark="TOPIX")
+                chart_nikkei = compute_price_chart_data(jq_client, selected_code, days=chart_days, benchmark="日経平均")
+            except Exception as e:
+                chart_topix = pd.DataFrame()
+                chart_nikkei = pd.DataFrame()
+                st.error(f"チャートデータ取得エラー: {e}")
+
+        # 両方を結合して1つのチャートに
+        if not chart_topix.empty:
+            merged_chart = chart_topix.rename(columns={"stock": selected_code})
+            if not chart_nikkei.empty and "日経平均株価" in chart_nikkei.columns:
+                nk_data = chart_nikkei[["date", "日経平均株価"]]
+                merged_chart = merged_chart.merge(nk_data, on="date", how="left")
+            st.markdown(f"#### 株価 vs TOPIX vs 日経平均 (正規化: 開始日=100)")
+            chart_cols = [c for c in merged_chart.columns if c != "date"]
+            st.line_chart(merged_chart.set_index("date")[chart_cols], width="stretch")
+
+        # ローリングベータ (TOPIX & 日経平均)
+        rolling_window = st.slider("ローリングベータ 窓幅(営業日)", 20, 120, 60, key="rolling_window")
+        with st.spinner("ローリングベータ計算中..."):
+            try:
+                roll_topix = compute_rolling_beta(jq_client, selected_code, window=rolling_window, days=chart_days + 200, benchmark="TOPIX")
+                roll_nikkei = compute_rolling_beta(jq_client, selected_code, window=rolling_window, days=chart_days + 200, benchmark="日経平均")
+            except Exception as e:
+                roll_topix = pd.DataFrame()
+                roll_nikkei = pd.DataFrame()
+                st.error(f"ローリングベータ取得エラー: {e}")
+
+        if not roll_topix.empty or not roll_nikkei.empty:
+            st.markdown(f"#### ローリングベータ ({rolling_window}日窓)")
+            merged_roll = pd.DataFrame()
+            if not roll_topix.empty:
+                merged_roll = roll_topix.rename(columns={"rolling_beta": "β(TOPIX)"})
+            if not roll_nikkei.empty:
+                rn = roll_nikkei.rename(columns={"rolling_beta": "β(日経平均)"})
+                if merged_roll.empty:
+                    merged_roll = rn
+                else:
+                    merged_roll = merged_roll.merge(rn, on="date", how="outer").sort_values("date")
+            if not merged_roll.empty:
+                beta_cols = [c for c in merged_roll.columns if c != "date"]
+                st.line_chart(merged_roll.set_index("date")[beta_cols], width="stretch")
+
+with tab_limits:
+    st.markdown('<div class="section-note">毎月の会社設定リスク枠を登録・管理します。マーケット指標タブで消化率が表示されます。</div>', unsafe_allow_html=True)
+
+    col_input, col_history = st.columns([3, 2])
+
+    with col_input:
+        st.markdown("### リスク枠 登録・更新")
+        from datetime import datetime as _dt
+        default_month = _dt.now().strftime("%Y-%m")
+        limit_month = st.text_input("対象月 (YYYY-MM)", value=default_month, key="limit_month")
+
+        # 既存データがあれば初期値に
+        existing = load_risk_limits(limit_month) if len(limit_month) == 7 else None
+
+        gross_val = st.number_input(
+            "グロス金額上限 (円)",
+            min_value=0,
+            value=int(existing["gross_limit"] or 0) if existing and existing["gross_limit"] else 0,
+            step=10_000_000,
+            help="1千万円単位で増減",
+            key="limit_gross",
+        )
+        if gross_val > 0:
+            st.caption(f"= {gross_val:,} 円")
+        net_val = st.number_input(
+            "ネット上限 (円)",
+            min_value=0,
+            value=int(existing["net_limit"] or 0) if existing and existing["net_limit"] else 0,
+            step=10_000_000,
+            help="1千万円単位で増減",
+            key="limit_net",
+        )
+        if net_val > 0:
+            st.caption(f"= {net_val:,} 円")
+        futures_val = st.number_input(
+            "先物枠 (円)",
+            min_value=0,
+            value=int(existing["futures_limit"] or 0) if existing and existing["futures_limit"] else 0,
+            step=10_000_000,
+            help="1千万円単位で増減",
+            key="limit_futures",
+        )
+        if futures_val > 0:
+            st.caption(f"= {futures_val:,} 円")
+        loss_val = st.number_input(
+            "月間損失限度額 (円)",
+            min_value=0,
+            value=int(existing["monthly_loss_limit"] or 0) if existing and existing["monthly_loss_limit"] else 0,
+            step=1_000_000,
+            help="100万円単位で増減",
+            key="limit_loss",
+        )
+        if loss_val > 0:
+            st.caption(f"= {loss_val:,} 円")
+        limit_note = st.text_input("メモ", value=existing["note"] or "" if existing else "", key="limit_note")
+
+        if st.button("保存する", type="primary", key="save_limits"):
+            if len(limit_month) != 7 or limit_month[4] != "-":
+                st.error("対象月は YYYY-MM 形式で入力してください。")
+            else:
+                save_risk_limits(
+                    month=limit_month,
+                    gross_limit=gross_val if gross_val > 0 else None,
+                    net_limit=net_val if net_val > 0 else None,
+                    futures_limit=futures_val if futures_val > 0 else None,
+                    monthly_loss_limit=loss_val if loss_val > 0 else None,
+                    note=limit_note,
+                )
+                st.success(f"{limit_month} のリスク枠を保存しました。")
+
+    with col_history:
+        st.markdown("### 登録済みリスク枠")
+        limit_months = list_risk_limit_months()
+        if not limit_months:
+            st.info("まだリスク枠が登録されていません。")
+        else:
+            history_rows = []
+            for m in limit_months:
+                rl = load_risk_limits(m)
+                if rl:
+                    history_rows.append({
+                        "対象月": rl["month"],
+                        "グロス上限": format_number(rl["gross_limit"] or 0),
+                        "ネット上限": format_number(rl["net_limit"] or 0),
+                        "先物枠": format_number(rl["futures_limit"] or 0),
+                        "損失限度": format_number(rl["monthly_loss_limit"] or 0),
+                        "メモ": rl["note"] or "",
+                        "更新日時": rl["updated_at"],
+                    })
+            if history_rows:
+                st.dataframe(pd.DataFrame(history_rows), width="stretch", hide_index=True)
 
 with tab_monthly:
     if not snapshot_months:
@@ -503,9 +1314,9 @@ with tab_monthly:
             c1.metric("当月TR損益", format_number(month_daily["TR損益"].sum(), "TR損益"))
             c2.metric("当月実現損益", format_number(month_daily["実現損益"].sum(), "実現損益"))
             c3.metric("月末評価損益", format_number(month_daily["評価損益"].iloc[-1], "評価損益"))
-            c4.metric("月末時価総額", format_number(month_daily["時価総額(円貨)"].iloc[-1], "時価総額(円貨)"))
+            c4.metric("月末評価額", format_number(month_daily["評価額(円貨)"].iloc[-1], "評価額(円貨)"))
 
-            st.line_chart(month_daily.set_index("snapshot_date")[["TR損益", "実現損益", "評価損益", "損益"]], use_container_width=True)
+            st.line_chart(month_daily.set_index("snapshot_date")[["TR損益", "実現損益", "評価損益", "損益"]], width="stretch")
 
             left, right = st.columns(2)
             with left:

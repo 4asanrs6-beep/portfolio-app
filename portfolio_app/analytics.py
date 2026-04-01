@@ -18,7 +18,7 @@ def _fill_numeric(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
 def summarize_by_direction(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(
-            columns=["方向", "件数", "ネット数量", "時価総額(円貨)", "簿価総額ネット", "TR損益", "実現損益", "評価損益", "損益"]
+            columns=["方向", "件数", "ネット数量", "評価額(円貨)", "簿価総額ネット", "TR損益", "実現損益", "評価損益", "損益"]
         )
 
     working = _fill_numeric(
@@ -31,7 +31,7 @@ def summarize_by_direction(df: pd.DataFrame) -> pd.DataFrame:
             件数=("code", "count"),
             ネット数量=("net_qty", "sum"),
             **{
-                "時価総額(円貨)": ("position_market_value_jpy", "sum"),
+                "評価額(円貨)": ("position_market_value_jpy", "sum"),
                 "簿価総額ネット": ("book_value_net", "sum"),
                 "TR損益": ("tr_pl", "sum"),
                 "実現損益": ("realized_pl", "sum"),
@@ -47,7 +47,7 @@ def summarize_by_direction(df: pd.DataFrame) -> pd.DataFrame:
 
 def summarize_by_account_category(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
-        return pd.DataFrame(columns=["口座区分", "件数", "買数量", "売数量", "ネット数量", "時価総額(円貨)", "損益"])
+        return pd.DataFrame(columns=["口座区分", "件数", "買数量", "売数量", "ネット数量", "評価額(円貨)", "損益"])
 
     working = _fill_numeric(df, ["buy_qty", "sell_qty", "net_qty", "position_market_value_jpy", "net_pl"])
     return (
@@ -57,7 +57,7 @@ def summarize_by_account_category(df: pd.DataFrame) -> pd.DataFrame:
             買数量=("buy_qty", "sum"),
             売数量=("sell_qty", "sum"),
             ネット数量=("net_qty", "sum"),
-            **{"時価総額(円貨)": ("position_market_value_jpy", "sum"), "損益": ("net_pl", "sum")},
+            **{"評価額(円貨)": ("position_market_value_jpy", "sum"), "損益": ("net_pl", "sum")},
         )
         .reset_index()
         .rename(columns={"account_category": "口座区分"})
@@ -187,9 +187,9 @@ def compare_snapshots(current_df: pd.DataFrame, previous_df: pd.DataFrame) -> pd
                 "net_qty_prev": "前日ネット数量",
                 "net_qty_curr": "当日ネット数量",
                 "qty_diff": "数量差分",
-                "market_value_prev": "前日時価総額(円貨)",
-                "market_value_curr": "当日時価総額(円貨)",
-                "market_value_diff": "時価総額差分",
+                "market_value_prev": "前日評価額(円貨)",
+                "market_value_curr": "当日評価額(円貨)",
+                "market_value_diff": "評価額差分",
                 "net_pl_prev": "前日損益",
                 "net_pl_curr": "当日損益",
                 "net_pl_diff": "損益差分",
@@ -217,7 +217,7 @@ def build_action_summary(compared_df: pd.DataFrame) -> pd.DataFrame:
 
 def build_daily_trend(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
-        return pd.DataFrame(columns=["snapshot_date", "TR損益", "実現損益", "評価損益", "損益", "時価総額(円貨)", "件数"])
+        return pd.DataFrame(columns=["snapshot_date", "TR損益", "実現損益", "評価損益", "損益", "評価額(円貨)", "件数"])
 
     working = _fill_numeric(df, ["tr_pl", "realized_pl", "unrealized_pl", "net_pl", "position_market_value_jpy"])
     result = (
@@ -228,7 +228,7 @@ def build_daily_trend(df: pd.DataFrame) -> pd.DataFrame:
                 "実現損益": ("realized_pl", "sum"),
                 "評価損益": ("unrealized_pl", "sum"),
                 "損益": ("net_pl", "sum"),
-                "時価総額(円貨)": ("position_market_value_jpy", "sum"),
+                "評価額(円貨)": ("position_market_value_jpy", "sum"),
                 "件数": ("code", "count"),
             }
         )
@@ -240,7 +240,7 @@ def build_daily_trend(df: pd.DataFrame) -> pd.DataFrame:
 
 def build_monthly_pnl(df: pd.DataFrame, month: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     if df.empty:
-        empty_daily = pd.DataFrame(columns=["snapshot_date", "TR損益", "実現損益", "評価損益", "損益", "時価総額(円貨)", "件数"])
+        empty_daily = pd.DataFrame(columns=["snapshot_date", "TR損益", "実現損益", "評価損益", "損益", "評価額(円貨)", "件数"])
         empty_contrib = pd.DataFrame(columns=["コード", "銘柄名", "TR損益", "実現損益", "評価損益", "損益", "平均ネット数量"])
         return empty_daily, empty_contrib
 
@@ -275,13 +275,13 @@ def build_monthly_pnl(df: pd.DataFrame, month: str) -> tuple[pd.DataFrame, pd.Da
 def build_instrument_timeline(df: pd.DataFrame, code: str) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(
-            columns=["snapshot_date", "コード", "銘柄名", "ネット数量", "買数量", "売数量", "時価総額(円貨)", "評価損益", "実現損益", "TR損益", "損益", "方向"]
+            columns=["snapshot_date", "コード", "銘柄名", "ネット数量", "買数量", "売数量", "評価額(円貨)", "評価損益", "実現損益", "TR損益", "損益", "方向"]
         )
 
     target = df[df["code"] == code].copy()
     if target.empty:
         return pd.DataFrame(
-            columns=["snapshot_date", "コード", "銘柄名", "ネット数量", "買数量", "売数量", "時価総額(円貨)", "評価損益", "実現損益", "TR損益", "損益", "方向"]
+            columns=["snapshot_date", "コード", "銘柄名", "ネット数量", "買数量", "売数量", "評価額(円貨)", "評価損益", "実現損益", "TR損益", "損益", "方向"]
         )
 
     target["snapshot_date"] = pd.to_datetime(target["snapshot_date"])
@@ -298,7 +298,7 @@ def build_instrument_timeline(df: pd.DataFrame, code: str) -> pd.DataFrame:
             買数量=("buy_qty", "sum"),
             売数量=("sell_qty", "sum"),
             **{
-                "時価総額(円貨)": ("position_market_value_jpy", "sum"),
+                "評価額(円貨)": ("position_market_value_jpy", "sum"),
                 "評価損益": ("unrealized_pl", "sum"),
                 "実現損益": ("realized_pl", "sum"),
                 "TR損益": ("tr_pl", "sum"),

@@ -109,6 +109,17 @@ ON position_snapshots (
     product_type,
     strategy_key
 );
+
+CREATE TABLE IF NOT EXISTS risk_limits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    month TEXT NOT NULL UNIQUE,
+    gross_limit REAL,
+    net_limit REAL,
+    futures_limit REAL,
+    monthly_loss_limit REAL,
+    note TEXT,
+    updated_at TEXT NOT NULL
+);
 """
 
 REQUIRED_COLUMNS = {
@@ -347,3 +358,72 @@ def load_previous_snapshot(snapshot_date: str) -> pd.DataFrame:
     if index + 1 >= len(dates):
         return pd.DataFrame()
     return load_snapshot(dates[index + 1])
+
+
+# ---------------------------------------------------------------------------
+# リスク枠 (risk_limits)
+# ---------------------------------------------------------------------------
+
+def save_risk_limits(
+    month: str,
+    gross_limit: float | None,
+    net_limit: float | None,
+    futures_limit: float | None,
+    monthly_loss_limit: float | None,
+    note: str = "",
+) -> None:
+    """月別リスク枠を UPSERT する。"""
+    updated_at = datetime.now().isoformat(timespec="seconds")
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO risk_limits (month, gross_limit, net_limit, futures_limit, monthly_loss_limit, note, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(month) DO UPDATE SET
+                gross_limit = excluded.gross_limit,
+                net_limit = excluded.net_limit,
+                futures_limit = excluded.futures_limit,
+                monthly_loss_limit = excluded.monthly_loss_limit,
+                note = excluded.note,
+                updated_at = excluded.updated_at
+            """,
+            (month, gross_limit, net_limit, futures_limit, monthly_loss_limit, note, updated_at),
+        )
+
+
+def load_risk_limits(month: str) -> dict | None:
+    """指定月のリスク枠を返す。無ければ None。"""
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM risk_limits WHERE month = ?",
+            (month,),
+        ).fetchone()
+    if row is None:
+        return None
+    return dict(row)
+
+
+def load_latest_risk_limits(as_of_month: str | None = None) -> dict | None:
+    """as_of_month 以前で最新のリスク枠を返す。"""
+    with get_connection() as conn:
+        if as_of_month:
+            row = conn.execute(
+                "SELECT * FROM risk_limits WHERE month <= ? ORDER BY month DESC LIMIT 1",
+                (as_of_month,),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT * FROM risk_limits ORDER BY month DESC LIMIT 1",
+            ).fetchone()
+    if row is None:
+        return None
+    return dict(row)
+
+
+def list_risk_limit_months() -> list[str]:
+    """リスク枠が登録されている月の一覧。"""
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT month FROM risk_limits ORDER BY month DESC"
+        ).fetchall()
+    return [row["month"] for row in rows]
