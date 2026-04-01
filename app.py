@@ -700,7 +700,7 @@ with tab_trend:
                 sign = "+" if diff > 0 else ""
                 return f"期間変化: {sign}{format_number(diff)}"
 
-            d_pl, cls_pl, lbl_pl = _delta_info("損益")
+            d_tr, cls_tr, lbl_tr = _delta_info("TR損益")
             d_real, cls_real, lbl_real = _delta_info("実現損益")
             d_eval, cls_eval, lbl_eval = _delta_info("評価損益")
             d_val, cls_val, lbl_val = _delta_info("評価額(円貨)")
@@ -709,10 +709,10 @@ with tab_trend:
             st.markdown(f"""
             <div class="trend-kpi-row">
               <div class="trend-kpi accent-pl">
-                <div class="trend-kpi-label">損益合計</div>
-                <div class="trend-kpi-value">{format_number(latest["損益"])}</div>
-                <div class="trend-kpi-delta {cls_pl}">{d_pl} {lbl_pl}</div>
-                <div class="trend-kpi-sub">{_period_info("損益")}</div>
+                <div class="trend-kpi-label">TR損益</div>
+                <div class="trend-kpi-value">{format_number(latest["TR損益"])}</div>
+                <div class="trend-kpi-delta {cls_tr}">{d_tr} {lbl_tr}</div>
+                <div class="trend-kpi-sub">{_period_info("TR損益")}</div>
               </div>
               <div class="trend-kpi accent-real">
                 <div class="trend-kpi-label">実現損益</div>
@@ -736,109 +736,114 @@ with tab_trend:
             """, unsafe_allow_html=True)
 
             # ---- Plotly チャート共通レイアウト ----
+            n_points = len(view_df)
+            # データ点が少ないときはマーカーを大きく、線を太く
+            _marker_size = 8 if n_points <= 10 else 5 if n_points <= 30 else 3
+            _line_main = 3.5 if n_points <= 15 else 2.8
+            _line_sub = 2 if n_points <= 15 else 1.5
+            _show_markers = n_points <= 40
+
             _chart_layout = dict(
                 template="none",
                 paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(255,255,255,0.5)",
-                font=dict(family="system-ui, sans-serif", size=12, color="#374151"),
-                margin=dict(l=10, r=10, t=36, b=10),
+                plot_bgcolor="rgba(255,255,255,0.35)",
+                font=dict(family="system-ui, -apple-system, sans-serif", size=12, color="#374151"),
+                margin=dict(l=12, r=12, t=8, b=48),
                 legend=dict(
-                    orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0,
-                    font=dict(size=11), bgcolor="rgba(0,0,0,0)",
+                    orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0,
+                    font=dict(size=11, color="#6b7280"), bgcolor="rgba(0,0,0,0)",
+                    itemsizing="constant",
                 ),
                 xaxis=dict(
-                    showgrid=False, linecolor="rgba(180,83,9,0.12)",
-                    tickformat="%m/%d", dtick="D7" if len(view_df) <= 60 else None,
+                    showgrid=False, linecolor="rgba(180,83,9,0.10)",
+                    tickformat="%m/%d", tickangle=-30,
+                    tickfont=dict(size=11, color="#9ca3af"),
+                    nticks=min(n_points, 15),
                 ),
                 yaxis=dict(
-                    showgrid=True, gridcolor="rgba(148,163,184,0.12)", gridwidth=1,
-                    zeroline=True, zerolinecolor="rgba(107,114,128,0.2)", zerolinewidth=1,
-                    linecolor="rgba(180,83,9,0.12)",
-                    tickformat=",",
+                    showgrid=True, gridcolor="rgba(148,163,184,0.08)", gridwidth=1,
+                    zeroline=True, zerolinecolor="rgba(194,65,12,0.18)", zerolinewidth=1.5,
+                    linecolor="rgba(180,83,9,0.10)",
+                    tickformat=",", tickfont=dict(size=11, color="#9ca3af"),
                 ),
                 hovermode="x unified",
-                hoverlabel=dict(bgcolor="white", font_size=12),
-                height=340,
+                hoverlabel=dict(bgcolor="white", font_size=12, bordercolor="#e5e7eb"),
+                height=400,
             )
 
             # ---- 損益推移チャート (主役) ----
-            st.markdown('<div class="trend-section-title">損益推移</div>', unsafe_allow_html=True)
+            _latest_pl = format_number(latest["TR損益"])
+            st.markdown(
+                f'<div class="trend-section-title">TR損益推移 &nbsp;<span style="font-size:1.1em;color:var(--ink)">{_latest_pl}</span></div>',
+                unsafe_allow_html=True,
+            )
 
             fig_pl = go.Figure()
 
-            # 実現損益 — 棒グラフ (薄め)
-            fig_pl.add_trace(go.Bar(
+            # 実現損益 — エリア (薄め背景)
+            fig_pl.add_trace(go.Scatter(
                 x=view_df["snapshot_date"], y=view_df["実現損益"],
                 name="実現損益",
-                marker_color="rgba(2,132,199,0.25)",
+                mode="lines",
+                line=dict(color="rgba(2,132,199,0.5)", width=_line_sub),
+                fill="tozeroy", fillcolor="rgba(2,132,199,0.06)",
                 hovertemplate="%{y:,.0f}",
             ))
 
-            # 評価損益 — 棒グラフ (薄め)
-            fig_pl.add_trace(go.Bar(
+            # 評価損益 — エリア (薄め背景)
+            fig_pl.add_trace(go.Scatter(
                 x=view_df["snapshot_date"], y=view_df["評価損益"],
                 name="評価損益",
-                marker_color="rgba(5,150,105,0.25)",
+                mode="lines",
+                line=dict(color="rgba(5,150,105,0.5)", width=_line_sub),
+                fill="tozeroy", fillcolor="rgba(5,150,105,0.06)",
                 hovertemplate="%{y:,.0f}",
             ))
 
-            # 損益合計 — 主役の太い折れ線
-            fig_pl.add_trace(go.Scatter(
-                x=view_df["snapshot_date"], y=view_df["損益"],
-                name="損益合計",
-                mode="lines+markers",
-                line=dict(color="#c2410c", width=3),
-                marker=dict(size=5, color="#c2410c"),
-                hovertemplate="%{y:,.0f}",
-            ))
-
-            # TR損益 — 補助の細い線
+            # TR損益 — 主役の太い折れ線
             fig_pl.add_trace(go.Scatter(
                 x=view_df["snapshot_date"], y=view_df["TR損益"],
                 name="TR損益",
-                mode="lines",
-                line=dict(color="#9ca3af", width=1.5, dash="dot"),
+                mode="lines+markers" if _show_markers else "lines",
+                line=dict(color="#c2410c", width=_line_main),
+                marker=dict(size=_marker_size, color="#c2410c", line=dict(width=1, color="white")) if _show_markers else None,
                 hovertemplate="%{y:,.0f}",
             ))
 
-            fig_pl.update_layout(
-                **_chart_layout,
-                barmode="group",
-                bargap=0.3,
-            )
+            # 損益合計 — 補助線
+            fig_pl.add_trace(go.Scatter(
+                x=view_df["snapshot_date"], y=view_df["損益"],
+                name="損益合計",
+                mode="lines",
+                line=dict(color="#78716c", width=1.5, dash="dash"),
+                hovertemplate="%{y:,.0f}",
+            ))
+
+            fig_pl.update_layout(**_chart_layout)
             st.plotly_chart(fig_pl, use_container_width=True, config={"displayModeBar": False})
 
-            # ---- 評価額推移チャート (補助) ----
-            st.markdown('<div class="trend-section-title">ポジション評価額推移</div>', unsafe_allow_html=True)
+            # ---- 評価額推移チャート ----
+            _latest_val = format_number(latest["評価額(円貨)"])
+            _latest_cnt = int(latest["件数"])
+            st.markdown(
+                f'<div class="trend-section-title">ポジション評価額 &nbsp;<span style="font-size:1.1em;color:var(--ink)">{_latest_val}円</span>'
+                f' &nbsp;<span style="font-size:0.85em;color:var(--muted)">({_latest_cnt}銘柄)</span></div>',
+                unsafe_allow_html=True,
+            )
 
             fig_val = go.Figure()
             fig_val.add_trace(go.Scatter(
                 x=view_df["snapshot_date"], y=view_df["評価額(円貨)"],
                 name="評価額",
-                mode="lines",
+                mode="lines+markers" if _show_markers else "lines",
                 fill="tozeroy",
-                line=dict(color="#7c3aed", width=2.5),
-                fillcolor="rgba(124,58,237,0.08)",
-                hovertemplate="%{y:,.0f}",
+                line=dict(color="#7c3aed", width=_line_main),
+                fillcolor="rgba(124,58,237,0.06)",
+                marker=dict(size=_marker_size, color="#7c3aed", line=dict(width=1, color="white")) if _show_markers else None,
+                hovertemplate="%{y:,.0f}円",
             ))
 
-            # 件数を右軸に
-            fig_val.add_trace(go.Scatter(
-                x=view_df["snapshot_date"], y=view_df["件数"],
-                name="銘柄数",
-                mode="lines+markers",
-                line=dict(color="#9ca3af", width=1, dash="dot"),
-                marker=dict(size=3, color="#9ca3af"),
-                yaxis="y2",
-                hovertemplate="%{y}",
-            ))
-
-            val_layout = {**_chart_layout}
-            val_layout["yaxis2"] = dict(
-                showgrid=False, overlaying="y", side="right",
-                tickformat=",", title="", linecolor="rgba(180,83,9,0.12)",
-            )
-            val_layout["height"] = 260
+            val_layout = {**_chart_layout, "height": 300}
             fig_val.update_layout(**val_layout)
             st.plotly_chart(fig_val, use_container_width=True, config={"displayModeBar": False})
 
