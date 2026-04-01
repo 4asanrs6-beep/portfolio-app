@@ -571,6 +571,12 @@ def render_table(df: pd.DataFrame, filename: str | None = None, download_label: 
 
 inject_theme()
 
+with st.sidebar:
+    if st.button("データ再読み込み", type="primary"):
+        st.session_state.clear()
+        st.cache_data.clear()
+        st.rerun()
+
 tab_import, tab_summary, tab_trend, tab_actions, tab_compare, tab_symbol, tab_market, tab_limits, tab_monthly, tab_history = st.tabs(
     ["取込", "日次サマリ", "推移", "当日アクション", "前日比較", "銘柄分析", "マーケット指標", "リスク枠", "月次", "履歴"]
 )
