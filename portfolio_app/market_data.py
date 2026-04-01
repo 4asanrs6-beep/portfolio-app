@@ -719,6 +719,7 @@ def compute_portfolio_weights(snapshot_df: pd.DataFrame) -> pd.DataFrame:
 
     df = snapshot_df.copy()
     df["position_market_value_jpy"] = pd.to_numeric(df["position_market_value_jpy"], errors="coerce").fillna(0)
+    df["book_value_net"] = pd.to_numeric(df["book_value_net"], errors="coerce").fillna(0)
     df["abs_market_value"] = df["position_market_value_jpy"].abs()
 
     total_abs = df["abs_market_value"].sum()
@@ -728,7 +729,7 @@ def compute_portfolio_weights(snapshot_df: pd.DataFrame) -> pd.DataFrame:
     df["weight_pct"] = df["position_market_value_jpy"] / total_abs * 100
     df["abs_weight_pct"] = df["abs_market_value"] / total_abs * 100
 
-    cols = ["code", "name", "direction", "net_qty", "position_market_value_jpy", "weight_pct", "abs_weight_pct"]
+    cols = ["code", "name", "direction", "net_qty", "position_market_value_jpy", "book_value_net", "weight_pct", "abs_weight_pct"]
     extra = [c for c in ["sector_33_name", "market_name"] if c in df.columns]
     return df[cols + extra].sort_values("abs_weight_pct", ascending=False).reset_index(drop=True)
 

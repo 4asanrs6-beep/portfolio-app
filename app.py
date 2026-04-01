@@ -692,8 +692,9 @@ with tab_market:
             w = weighted.copy()
             w["_is_eq"] = w["code"].apply(is_equity_code)
             mv = pd.to_numeric(w["position_market_value_jpy"], errors="coerce").fillna(0)
+            bv = pd.to_numeric(enriched["book_value_net"], errors="coerce").fillna(0)
 
-            # 全体
+            # 全体 (時価)
             gross_actual = mv.abs().sum()
             net_actual = mv.sum()
             long_mv = mv[mv > 0].sum()
@@ -701,8 +702,15 @@ with tab_market:
             long_count = int((mv > 0).sum())
             short_count = int((mv < 0).sum())
 
-            # 株式のみ
-            eq_mv = mv[w["_is_eq"]]
+            # 全体 (簿価)
+            bv_gross = bv.abs().sum()
+            bv_net = bv.sum()
+            bv_long = bv[bv > 0].sum()
+            bv_short = bv[bv < 0].sum()
+
+            # 株式のみ (時価)
+            eq_mask = w["_is_eq"]
+            eq_mv = mv[eq_mask]
             eq_gross = eq_mv.abs().sum()
             eq_net = eq_mv.sum()
             eq_long = eq_mv[eq_mv > 0].sum()
@@ -710,11 +718,19 @@ with tab_market:
             eq_long_cnt = int((eq_mv > 0).sum())
             eq_short_cnt = int((eq_mv < 0).sum())
 
+            # 株式のみ (簿価)
+            eq_bv = bv[eq_mask]
+            eq_bv_gross = eq_bv.abs().sum()
+            eq_bv_net = eq_bv.sum()
+
             # 先物のみ
-            fut_mv = mv[~w["_is_eq"]]
+            fut_mv = mv[~eq_mask]
             fut_gross = fut_mv.abs().sum()
             fut_net = fut_mv.sum()
-            fut_count = int((~w["_is_eq"]).sum())
+            fut_count = int((~eq_mask).sum())
+            fut_bv = bv[~eq_mask]
+            fut_bv_gross = fut_bv.abs().sum()
+            fut_bv_net = fut_bv.sum()
 
             with st.spinner(f"全銘柄のベータ・指標を取得中 (TOPIX & 日経平均 / {beta_period_label})..."):
                 try:
@@ -724,9 +740,12 @@ with tab_market:
                     st.error(f"ポートフォリオ指標取得エラー: {e}")
 
             # ---- ポジション概要テーブル ----
+            _fut_long = fut_mv[fut_mv > 0].sum() if len(fut_mv[fut_mv > 0]) else 0
+            _fut_short = fut_mv[fut_mv < 0].sum() if len(fut_mv[fut_mv < 0]) else 0
+
             st.markdown(f"""
             <table class="dash-table">
-              <caption>ポジション概要</caption>
+              <caption>ポジション概要 (時価ベース)</caption>
               <tr>
                 <th></th><th>ロング</th><th>ショート</th><th>ネット</th><th>グロス</th><th>銘柄数</th>
               </tr>
@@ -740,8 +759,8 @@ with tab_market:
               </tr>
               <tr>
                 <td>先物</td>
-                <td>{_colored(fut_mv[fut_mv > 0].sum() if len(fut_mv[fut_mv > 0]) else 0, "円")}</td>
-                <td>{_colored(fut_mv[fut_mv < 0].sum() if len(fut_mv[fut_mv < 0]) else 0, "円")}</td>
+                <td>{_colored(_fut_long, "円")}</td>
+                <td>{_colored(_fut_short, "円")}</td>
                 <td>{_colored(fut_net, "円")}</td>
                 <td>{format_number(fut_gross)}円</td>
                 <td>{fut_count}</td>
@@ -753,6 +772,36 @@ with tab_market:
                 <td>{_colored(net_actual, "円")}</td>
                 <td>{format_number(gross_actual)}円</td>
                 <td>{long_count + short_count}</td>
+              </tr>
+            </table>
+            """, unsafe_allow_html=True)
+
+            st.markdown(f"""
+            <table class="dash-table">
+              <caption>ポジション概要 (簿価ベース)</caption>
+              <tr>
+                <th></th><th>ロング</th><th>ショート</th><th>ネット</th><th>グロス</th>
+              </tr>
+              <tr>
+                <td>株式</td>
+                <td>{_colored(eq_bv[eq_bv > 0].sum() if len(eq_bv[eq_bv > 0]) else 0, "円")}</td>
+                <td>{_colored(eq_bv[eq_bv < 0].sum() if len(eq_bv[eq_bv < 0]) else 0, "円")}</td>
+                <td>{_colored(eq_bv_net, "円")}</td>
+                <td>{format_number(eq_bv_gross)}円</td>
+              </tr>
+              <tr>
+                <td>先物</td>
+                <td>{_colored(fut_bv[fut_bv > 0].sum() if len(fut_bv[fut_bv > 0]) else 0, "円")}</td>
+                <td>{_colored(fut_bv[fut_bv < 0].sum() if len(fut_bv[fut_bv < 0]) else 0, "円")}</td>
+                <td>{_colored(fut_bv_net, "円")}</td>
+                <td>{format_number(fut_bv_gross)}円</td>
+              </tr>
+              <tr style="font-weight:800; border-top:2px solid rgba(180,83,9,0.2)">
+                <td>合計</td>
+                <td>{_colored(bv_long, "円")}</td>
+                <td>{_colored(bv_short, "円")}</td>
+                <td>{_colored(bv_net, "円")}</td>
+                <td>{format_number(bv_gross)}円</td>
               </tr>
             </table>
             """, unsafe_allow_html=True)
@@ -906,9 +955,11 @@ with tab_market:
             copy_lines = [
                 f"ポートフォリオ概要 ({market_date} / {beta_period_label})",
                 "",
-                f"[株式] L: {format_number(eq_long)}円({eq_long_cnt}) / S: {format_number(eq_short)}円({eq_short_cnt}) / Net: {format_number(eq_net)}円 / Gross: {format_number(eq_gross)}円",
+                f"[株式・時価] L: {format_number(eq_long)}円({eq_long_cnt}) / S: {format_number(eq_short)}円({eq_short_cnt}) / Net: {format_number(eq_net)}円 / Gross: {format_number(eq_gross)}円",
+                f"[株式・簿価] Net: {format_number(eq_bv_net)}円 / Gross: {format_number(eq_bv_gross)}円",
                 f"[先物] Net: {format_number(fut_net)}円 / Gross: {format_number(fut_gross)}円 ({fut_count}銘柄)",
-                f"[合計] L: {format_number(long_mv)}円 / S: {format_number(short_mv)}円 / Net: {format_number(net_actual)}円 / Gross: {format_number(gross_actual)}円",
+                f"[合計・時価] L: {format_number(long_mv)}円 / S: {format_number(short_mv)}円 / Net: {format_number(net_actual)}円 / Gross: {format_number(gross_actual)}円",
+                f"[合計・簿価] Net: {format_number(bv_net)}円 / Gross: {format_number(bv_gross)}円",
             ]
             if pr:
                 copy_lines += [
@@ -944,11 +995,11 @@ with tab_market:
             st.markdown("### 銘柄一覧")
 
             # ベース: ウェイト
-            unified = weighted[["code", "name", "direction", "net_qty", "position_market_value_jpy", "weight_pct"]].copy()
+            unified = weighted[["code", "name", "direction", "net_qty", "position_market_value_jpy", "book_value_net", "weight_pct"]].copy()
             unified = unified.rename(columns={
                 "code": "コード", "name": "銘柄名", "direction": "方向",
                 "net_qty": "数量", "position_market_value_jpy": "評価額(円)",
-                "weight_pct": "ウェイト(%)",
+                "book_value_net": "簿価(円)", "weight_pct": "ウェイト(%)",
             })
 
             # 時価総額・バリュエーション (stock_info_df は上で取得済み)
