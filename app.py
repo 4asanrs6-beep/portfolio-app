@@ -780,22 +780,31 @@ with tab_market:
             if pr:
                 st.markdown(f"""
                 <table class="dash-table">
-                  <caption>加重ベータ — 株式のみ (3M / 6M / 12M)</caption>
+                  <caption>加重ベータ (3M / 6M / 12M)</caption>
                   <tr>
-                    <th></th><th>3ヶ月</th><th>6ヶ月</th><th>12ヶ月</th><th>L/S内訳({beta_period_label})</th>
+                    <th></th><th colspan="3">先物込み</th><th colspan="3">株式のみ</th><th>L/S ({beta_period_label})</th>
+                  </tr>
+                  <tr>
+                    <th></th><th>3M</th><th>6M</th><th>12M</th><th>3M</th><th>6M</th><th>12M</th><th></th>
                   </tr>
                   <tr>
                     <td>β (TOPIX)</td>
-                    <td>{_v(pr.get('topix_beta_3M'))}</td>
-                    <td>{_v(pr.get('topix_beta_6M'))}</td>
+                    <td><b>{_v(pr.get('topix_beta_3M'))}</b></td>
+                    <td><b>{_v(pr.get('topix_beta_6M'))}</b></td>
                     <td><b>{_v(pr.get('topix_beta_12M'))}</b></td>
+                    <td>{_v(pr.get('topix_beta_3M_eq'))}</td>
+                    <td>{_v(pr.get('topix_beta_6M_eq'))}</td>
+                    <td>{_v(pr.get('topix_beta_12M_eq'))}</td>
                     <td class="val-muted">L {_v(pr.get('topix_long_beta'))} / S {_v(pr.get('topix_short_beta'))}</td>
                   </tr>
                   <tr>
                     <td>β (日経平均)</td>
-                    <td>{_v(pr.get('nikkei_beta_3M'))}</td>
-                    <td>{_v(pr.get('nikkei_beta_6M'))}</td>
+                    <td><b>{_v(pr.get('nikkei_beta_3M'))}</b></td>
+                    <td><b>{_v(pr.get('nikkei_beta_6M'))}</b></td>
                     <td><b>{_v(pr.get('nikkei_beta_12M'))}</b></td>
+                    <td>{_v(pr.get('nikkei_beta_3M_eq'))}</td>
+                    <td>{_v(pr.get('nikkei_beta_6M_eq'))}</td>
+                    <td>{_v(pr.get('nikkei_beta_12M_eq'))}</td>
                     <td class="val-muted">L {_v(pr.get('nikkei_long_beta'))} / S {_v(pr.get('nikkei_short_beta'))}</td>
                   </tr>
                 </table>
@@ -904,8 +913,8 @@ with tab_market:
             if pr:
                 copy_lines += [
                     "",
-                    f"β(TOPIX)  3M: {pr.get('topix_beta_3M', '-')}  6M: {pr.get('topix_beta_6M', '-')}  12M: {pr.get('topix_beta_12M', '-')}  L: {pr.get('topix_long_beta', '-')}  S: {pr.get('topix_short_beta', '-')}",
-                    f"β(日経)   3M: {pr.get('nikkei_beta_3M', '-')}  6M: {pr.get('nikkei_beta_6M', '-')}  12M: {pr.get('nikkei_beta_12M', '-')}",
+                    f"β(TOPIX) 先物込: 3M {pr.get('topix_beta_3M', '-')} / 6M {pr.get('topix_beta_6M', '-')} / 12M {pr.get('topix_beta_12M', '-')}  株のみ: 3M {pr.get('topix_beta_3M_eq', '-')} / 6M {pr.get('topix_beta_6M_eq', '-')} / 12M {pr.get('topix_beta_12M_eq', '-')}",
+                    f"β(日経)  先物込: 3M {pr.get('nikkei_beta_3M', '-')} / 6M {pr.get('nikkei_beta_6M', '-')} / 12M {pr.get('nikkei_beta_12M', '-')}  株のみ: 3M {pr.get('nikkei_beta_3M_eq', '-')} / 6M {pr.get('nikkei_beta_6M_eq', '-')} / 12M {pr.get('nikkei_beta_12M_eq', '-')}",
                     f"ボラティリティ(年率): {pr.get('weighted_vol', '-')}%  シャープ: {pr.get('weighted_sharpe', '-')}  リターン: {pr.get('weighted_return', '-')}%",
                 ]
             if rl:

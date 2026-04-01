@@ -885,20 +885,27 @@ def compute_portfolio_all(
     result["concentration_top3"] = round(sorted_abs.head(3).sum(), 1)
     result["concentration_top5"] = round(sorted_abs.head(5).sum(), 1)
 
-    # 加重ベータ (メイン期間 TOPIX)
+    # 株式のみサブセット
+    sm_eq = sm[sm["コード"].apply(is_equity_code)]
+
+    # 加重ベータ (メイン期間 TOPIX) — 全体
     if "β(TOPIX)" in sm.columns:
         tb = _aggregate_betas(sm, weighted_df, "β(TOPIX)")
         result["topix_beta"] = tb["weighted"]
         result["topix_long_beta"] = tb["long"]
         result["topix_short_beta"] = tb["short"]
 
-    # 加重ベータ (各期間 × 各ベンチマーク)
+    # 加重ベータ (各期間 × 各ベンチマーク) — 全体 (先物込み) & 株式のみ
     for prefix, bm_name in [("T", "topix"), ("N", "nikkei")]:
         for label, _ in [("3M", 90), ("6M", 180), ("12M", 365)]:
             col = f"β({prefix}{label})"
             if col in sm.columns:
+                # 先物込み
                 ab = _aggregate_betas(sm, weighted_df, col)
                 result[f"{bm_name}_beta_{label}"] = ab["weighted"]
+                # 株式のみ
+                ab_eq = _aggregate_betas(sm_eq, weighted_df, col)
+                result[f"{bm_name}_beta_{label}_eq"] = ab_eq["weighted"]
 
     # 加重ボラティリティ & シャープ
     valid_vol = sm.dropna(subset=["ボラティリティ(年率%)"])
