@@ -65,7 +65,20 @@ def summarize_by_account_category(df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def _classify_action(prev_qty: float, curr_qty: float) -> str:
+def _classify_action(
+    prev_qty: float,
+    curr_qty: float,
+    buy_qty: float = 0,
+    sell_qty: float = 0,
+    realized_pl: float = 0,
+) -> str:
+    # デイトレ判定: 前日も当日もポジション0だが、売買と実現損益がある
+    if prev_qty == 0 and curr_qty == 0:
+        if buy_qty > 0 and sell_qty > 0:
+            return "デイトレ"
+        if realized_pl != 0 and (buy_qty > 0 or sell_qty > 0):
+            return "デイトレ"
+        return "変化なし"
     if prev_qty == 0 and curr_qty > 0:
         return "新規買い"
     if prev_qty == 0 and curr_qty < 0:
@@ -102,6 +115,8 @@ def compare_snapshots(current_df: pd.DataFrame, previous_df: pd.DataFrame) -> pd
         columns={
             "direction": "direction_curr",
             "net_qty": "net_qty_curr",
+            "buy_qty": "buy_qty_curr",
+            "sell_qty": "sell_qty_curr",
             "position_market_value_jpy": "market_value_curr",
             "net_pl": "net_pl_curr",
             "unrealized_pl": "unrealized_pl_curr",
@@ -115,6 +130,8 @@ def compare_snapshots(current_df: pd.DataFrame, previous_df: pd.DataFrame) -> pd
         columns={
             "direction": "direction_prev",
             "net_qty": "net_qty_prev",
+            "buy_qty": "buy_qty_prev",
+            "sell_qty": "sell_qty_prev",
             "position_market_value_jpy": "market_value_prev",
             "net_pl": "net_pl_prev",
             "unrealized_pl": "unrealized_pl_prev",
@@ -126,7 +143,7 @@ def compare_snapshots(current_df: pd.DataFrame, previous_df: pd.DataFrame) -> pd
     )
     merged = current.merge(previous, on=COMPARE_KEYS, how="outer")
     for column in [
-        "net_qty_curr",
+        "net_qty_curr", "buy_qty_curr", "sell_qty_curr",
         "market_value_curr",
         "net_pl_curr",
         "unrealized_pl_curr",
@@ -134,7 +151,7 @@ def compare_snapshots(current_df: pd.DataFrame, previous_df: pd.DataFrame) -> pd
         "tr_pl_curr",
         "book_price_curr",
         "last_price_curr",
-        "net_qty_prev",
+        "net_qty_prev", "buy_qty_prev", "sell_qty_prev",
         "market_value_prev",
         "net_pl_prev",
         "unrealized_pl_prev",
@@ -147,7 +164,15 @@ def compare_snapshots(current_df: pd.DataFrame, previous_df: pd.DataFrame) -> pd
             merged[column] = 0
         merged[column] = pd.to_numeric(merged[column], errors="coerce").fillna(0)
 
-    merged["action_type"] = merged.apply(lambda row: _classify_action(row["net_qty_prev"], row["net_qty_curr"]), axis=1)
+    merged["action_type"] = merged.apply(
+        lambda row: _classify_action(
+            row["net_qty_prev"], row["net_qty_curr"],
+            buy_qty=row.get("buy_qty_curr", 0),
+            sell_qty=row.get("sell_qty_curr", 0),
+            realized_pl=row.get("realized_pl_curr", 0),
+        ),
+        axis=1,
+    )
     merged["qty_diff"] = merged["net_qty_curr"] - merged["net_qty_prev"]
     merged["market_value_diff"] = merged["market_value_curr"] - merged["market_value_prev"]
     merged["net_pl_diff"] = merged["net_pl_curr"] - merged["net_pl_prev"]
