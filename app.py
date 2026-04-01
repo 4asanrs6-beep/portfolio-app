@@ -4,6 +4,7 @@ import os
 from datetime import date
 
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 from pandas.api.types import is_numeric_dtype
 
@@ -386,6 +387,102 @@ CSS = """
   color: var(--muted);
   margin-top: 0.15rem;
 }
+
+/* ---- Trend Dashboard ---- */
+.trend-period-bar {
+  display: flex;
+  gap: 0.35rem;
+  margin-bottom: 1.2rem;
+}
+.trend-period-btn {
+  padding: 0.45rem 1.1rem;
+  border-radius: 12px;
+  border: 1px solid rgba(180,83,9,0.14);
+  background: rgba(255,255,255,0.7);
+  color: var(--muted);
+  font-weight: 700;
+  font-size: 0.82rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.trend-period-btn.active,
+.trend-period-btn:hover {
+  background: linear-gradient(135deg, #c2410c, #9a3412);
+  color: #fff;
+  border-color: transparent;
+}
+
+.trend-kpi-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.9rem;
+  margin-bottom: 1.4rem;
+}
+.trend-kpi {
+  background: linear-gradient(180deg, rgba(255,255,255,0.97), rgba(255,250,243,0.92));
+  border: 1px solid rgba(180,83,9,0.10);
+  border-radius: 20px;
+  padding: 1.1rem 1.2rem 1rem;
+  box-shadow: 0 10px 28px rgba(120,53,15,0.06);
+  position: relative;
+  overflow: hidden;
+}
+.trend-kpi::after {
+  content: "";
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 3px;
+  border-radius: 20px 20px 0 0;
+}
+.trend-kpi.accent-pl::after   { background: linear-gradient(90deg, #c2410c, #ea580c); }
+.trend-kpi.accent-real::after { background: linear-gradient(90deg, #0284c7, #0ea5e9); }
+.trend-kpi.accent-eval::after { background: linear-gradient(90deg, #059669, #10b981); }
+.trend-kpi.accent-val::after  { background: linear-gradient(90deg, #7c3aed, #8b5cf6); }
+
+.trend-kpi-label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  font-weight: 700;
+  margin-bottom: 0.35rem;
+}
+.trend-kpi-value {
+  font-size: 1.55rem;
+  font-weight: 800;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.15;
+}
+.trend-kpi-delta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.78rem;
+  font-weight: 700;
+  margin-top: 0.3rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 8px;
+}
+.trend-kpi-delta.up   { color: #15803d; background: rgba(5,150,105,0.08); }
+.trend-kpi-delta.down { color: #dc2626; background: rgba(220,38,38,0.08); }
+.trend-kpi-delta.flat { color: var(--muted); background: rgba(107,114,128,0.06); }
+.trend-kpi-sub {
+  font-size: 0.72rem;
+  color: var(--muted);
+  margin-top: 0.25rem;
+}
+
+.trend-section-title {
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--accent);
+  font-weight: 700;
+  margin: 1.6rem 0 0.7rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid rgba(180,83,9,0.12);
+}
 </style>
 """
 
@@ -560,27 +657,224 @@ with tab_trend:
     if trend_df.empty:
         st.info("推移を表示するデータがありません。")
     else:
-        range_label = st.selectbox("期間", ["全期間", "過去30日", "今月"], key="trend_range")
+        # ---- 期間セレクタ ----
+        period_options = ["1D", "5D", "1M", "3M", "YTD", "全期間"]
+        selected_period = st.radio(
+            "期間", period_options, index=4, horizontal=True, key="trend_period",
+            label_visibility="collapsed",
+        )
+
         view_df = trend_df.copy()
-        if range_label == "過去30日":
-            cutoff = view_df["snapshot_date"].max() - pd.Timedelta(days=29)
-            view_df = view_df[view_df["snapshot_date"] >= cutoff]
-        elif range_label == "今月":
-            month_period = view_df["snapshot_date"].max().to_period("M")
-            view_df = view_df[view_df["snapshot_date"].dt.to_period("M") == month_period]
+        max_date = view_df["snapshot_date"].max()
+        if selected_period == "1D":
+            view_df = view_df[view_df["snapshot_date"] == max_date]
+        elif selected_period == "5D":
+            view_df = view_df[view_df["snapshot_date"] >= max_date - pd.Timedelta(days=6)]
+        elif selected_period == "1M":
+            view_df = view_df[view_df["snapshot_date"] >= max_date - pd.Timedelta(days=30)]
+        elif selected_period == "3M":
+            view_df = view_df[view_df["snapshot_date"] >= max_date - pd.Timedelta(days=90)]
+        elif selected_period == "YTD":
+            view_df = view_df[view_df["snapshot_date"] >= pd.Timestamp(f"{max_date.year}-01-01")]
 
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("最新TR損益", format_number(view_df["TR損益"].iloc[-1], "TR損益"))
-        c2.metric("最新実現損益", format_number(view_df["実現損益"].iloc[-1], "実現損益"))
-        c3.metric("最新評価損益", format_number(view_df["評価損益"].iloc[-1], "評価損益"))
-        c4.metric("最新評価額(円貨)", format_number(view_df["評価額(円貨)"].iloc[-1], "評価額(円貨)"))
+        if view_df.empty:
+            st.info("選択期間にデータがありません。")
+        else:
+            latest = view_df.iloc[-1]
+            prev = view_df.iloc[-2] if len(view_df) >= 2 else latest
+            first = view_df.iloc[0]
 
-        st.line_chart(view_df.set_index("snapshot_date")[["TR損益", "実現損益", "評価損益", "損益"]], width="stretch")
-        st.line_chart(view_df.set_index("snapshot_date")[["評価額(円貨)"]], width="stretch")
+            # 前日比・期間変化
+            def _delta_info(col: str) -> tuple[str, str, str]:
+                curr = float(latest[col])
+                prv = float(prev[col])
+                diff = curr - prv
+                sign = "+" if diff > 0 else ""
+                cls = "up" if diff > 0 else "down" if diff < 0 else "flat"
+                return f"{sign}{format_number(diff)}", cls, f"前日比"
 
-        display_trend = view_df.copy()
-        display_trend["snapshot_date"] = display_trend["snapshot_date"].dt.strftime("%Y-%m-%d")
-        render_table(display_trend, "daily_trend.csv", "推移CSV")
+            def _period_info(col: str) -> str:
+                curr = float(latest[col])
+                fst = float(first[col])
+                diff = curr - fst
+                sign = "+" if diff > 0 else ""
+                return f"期間変化: {sign}{format_number(diff)}"
+
+            d_pl, cls_pl, lbl_pl = _delta_info("損益")
+            d_real, cls_real, lbl_real = _delta_info("実現損益")
+            d_eval, cls_eval, lbl_eval = _delta_info("評価損益")
+            d_val, cls_val, lbl_val = _delta_info("評価額(円貨)")
+
+            # ---- KPI カード ----
+            st.markdown(f"""
+            <div class="trend-kpi-row">
+              <div class="trend-kpi accent-pl">
+                <div class="trend-kpi-label">損益合計</div>
+                <div class="trend-kpi-value">{format_number(latest["損益"])}</div>
+                <div class="trend-kpi-delta {cls_pl}">{d_pl} {lbl_pl}</div>
+                <div class="trend-kpi-sub">{_period_info("損益")}</div>
+              </div>
+              <div class="trend-kpi accent-real">
+                <div class="trend-kpi-label">実現損益</div>
+                <div class="trend-kpi-value">{format_number(latest["実現損益"])}</div>
+                <div class="trend-kpi-delta {cls_real}">{d_real} {lbl_real}</div>
+                <div class="trend-kpi-sub">{_period_info("実現損益")}</div>
+              </div>
+              <div class="trend-kpi accent-eval">
+                <div class="trend-kpi-label">評価損益</div>
+                <div class="trend-kpi-value">{format_number(latest["評価損益"])}</div>
+                <div class="trend-kpi-delta {cls_eval}">{d_eval} {lbl_eval}</div>
+                <div class="trend-kpi-sub">{_period_info("評価損益")}</div>
+              </div>
+              <div class="trend-kpi accent-val">
+                <div class="trend-kpi-label">ポジション評価額</div>
+                <div class="trend-kpi-value">{format_number(latest["評価額(円貨)"])}</div>
+                <div class="trend-kpi-delta {cls_val}">{d_val} {lbl_val}</div>
+                <div class="trend-kpi-sub">銘柄数: {int(latest["件数"])}</div>
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # ---- Plotly チャート共通レイアウト ----
+            _chart_layout = dict(
+                template="none",
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(255,255,255,0.5)",
+                font=dict(family="system-ui, sans-serif", size=12, color="#374151"),
+                margin=dict(l=10, r=10, t=36, b=10),
+                legend=dict(
+                    orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0,
+                    font=dict(size=11), bgcolor="rgba(0,0,0,0)",
+                ),
+                xaxis=dict(
+                    showgrid=False, linecolor="rgba(180,83,9,0.12)",
+                    tickformat="%m/%d", dtick="D7" if len(view_df) <= 60 else None,
+                ),
+                yaxis=dict(
+                    showgrid=True, gridcolor="rgba(148,163,184,0.12)", gridwidth=1,
+                    zeroline=True, zerolinecolor="rgba(107,114,128,0.2)", zerolinewidth=1,
+                    linecolor="rgba(180,83,9,0.12)",
+                    tickformat=",",
+                ),
+                hovermode="x unified",
+                hoverlabel=dict(bgcolor="white", font_size=12),
+                height=340,
+            )
+
+            # ---- 損益推移チャート (主役) ----
+            st.markdown('<div class="trend-section-title">損益推移</div>', unsafe_allow_html=True)
+
+            fig_pl = go.Figure()
+
+            # 実現損益 — 棒グラフ (薄め)
+            fig_pl.add_trace(go.Bar(
+                x=view_df["snapshot_date"], y=view_df["実現損益"],
+                name="実現損益",
+                marker_color="rgba(2,132,199,0.25)",
+                hovertemplate="%{y:,.0f}",
+            ))
+
+            # 評価損益 — 棒グラフ (薄め)
+            fig_pl.add_trace(go.Bar(
+                x=view_df["snapshot_date"], y=view_df["評価損益"],
+                name="評価損益",
+                marker_color="rgba(5,150,105,0.25)",
+                hovertemplate="%{y:,.0f}",
+            ))
+
+            # 損益合計 — 主役の太い折れ線
+            fig_pl.add_trace(go.Scatter(
+                x=view_df["snapshot_date"], y=view_df["損益"],
+                name="損益合計",
+                mode="lines+markers",
+                line=dict(color="#c2410c", width=3),
+                marker=dict(size=5, color="#c2410c"),
+                hovertemplate="%{y:,.0f}",
+            ))
+
+            # TR損益 — 補助の細い線
+            fig_pl.add_trace(go.Scatter(
+                x=view_df["snapshot_date"], y=view_df["TR損益"],
+                name="TR損益",
+                mode="lines",
+                line=dict(color="#9ca3af", width=1.5, dash="dot"),
+                hovertemplate="%{y:,.0f}",
+            ))
+
+            fig_pl.update_layout(
+                **_chart_layout,
+                barmode="group",
+                bargap=0.3,
+            )
+            st.plotly_chart(fig_pl, use_container_width=True, config={"displayModeBar": False})
+
+            # ---- 評価額推移チャート (補助) ----
+            st.markdown('<div class="trend-section-title">ポジション評価額推移</div>', unsafe_allow_html=True)
+
+            fig_val = go.Figure()
+            fig_val.add_trace(go.Scatter(
+                x=view_df["snapshot_date"], y=view_df["評価額(円貨)"],
+                name="評価額",
+                mode="lines",
+                fill="tozeroy",
+                line=dict(color="#7c3aed", width=2.5),
+                fillcolor="rgba(124,58,237,0.08)",
+                hovertemplate="%{y:,.0f}",
+            ))
+
+            # 件数を右軸に
+            fig_val.add_trace(go.Scatter(
+                x=view_df["snapshot_date"], y=view_df["件数"],
+                name="銘柄数",
+                mode="lines+markers",
+                line=dict(color="#9ca3af", width=1, dash="dot"),
+                marker=dict(size=3, color="#9ca3af"),
+                yaxis="y2",
+                hovertemplate="%{y}",
+            ))
+
+            val_layout = {**_chart_layout}
+            val_layout["yaxis2"] = dict(
+                showgrid=False, overlaying="y", side="right",
+                tickformat=",", title="", linecolor="rgba(180,83,9,0.12)",
+            )
+            val_layout["height"] = 260
+            fig_val.update_layout(**val_layout)
+            st.plotly_chart(fig_val, use_container_width=True, config={"displayModeBar": False})
+
+            # ---- 日次テーブル (差分付き) ----
+            st.markdown('<div class="trend-section-title">日次データ</div>', unsafe_allow_html=True)
+
+            table_df = view_df.copy()
+            table_df["snapshot_date"] = table_df["snapshot_date"].dt.strftime("%Y-%m-%d")
+
+            # 差分列を追加
+            for col in ["損益", "実現損益", "評価損益", "評価額(円貨)", "件数"]:
+                table_df[f"{col}_diff"] = view_df[col].diff()
+
+            display_cols = ["snapshot_date"]
+            for col in ["損益", "実現損益", "評価損益", "TR損益", "評価額(円貨)", "件数"]:
+                display_cols.append(col)
+                diff_col = f"{col}_diff"
+                if diff_col in table_df.columns:
+                    display_cols.append(diff_col)
+
+            table_display = table_df[[c for c in display_cols if c in table_df.columns]].rename(columns={
+                "snapshot_date": "日付",
+                "損益_diff": "損益(前日比)",
+                "実現損益_diff": "実現(前日比)",
+                "評価損益_diff": "評価(前日比)",
+                "評価額(円貨)_diff": "評価額(前日比)",
+                "件数_diff": "件数(増減)",
+            })
+            # 最新が上
+            table_display = table_display.iloc[::-1].reset_index(drop=True)
+            st.dataframe(format_display_table(table_display), width="stretch", hide_index=True)
+
+            st.download_button(
+                "推移CSVダウンロード", data=to_csv_bytes(table_display),
+                file_name="daily_trend.csv", mime="text/csv",
+            )
 
 with tab_actions:
     if not snapshot_dates:

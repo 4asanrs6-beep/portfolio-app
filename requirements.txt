@@ -4,3 +4,4 @@ numpy>=1.26,<3
 jquants-api-client>=2.0.0
 python-dotenv>=1.0
 yfinance>=0.2
+plotly>=5.0
