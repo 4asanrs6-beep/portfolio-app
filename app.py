@@ -692,7 +692,7 @@ with tab_market:
             w = weighted.copy()
             w["_is_eq"] = w.apply(lambda r: is_equity_code(r["code"], r.get("product_type")), axis=1)
             mv = pd.to_numeric(w["position_market_value_jpy"], errors="coerce").fillna(0)
-            bv = pd.to_numeric(enriched["book_value_net"], errors="coerce").fillna(0)
+            bv = pd.to_numeric(w["book_value_net"], errors="coerce").fillna(0)
 
             # 全体 (時価)
             gross_actual = mv.abs().sum()
