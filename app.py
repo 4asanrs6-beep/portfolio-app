@@ -690,7 +690,7 @@ with tab_market:
         if not weighted.empty:
             # ポジション金額 (API 不要) — 株式 / 先物を分離
             w = weighted.copy()
-            w["_is_eq"] = w["code"].apply(is_equity_code)
+            w["_is_eq"] = w.apply(lambda r: is_equity_code(r["code"], r.get("product_type")), axis=1)
             mv = pd.to_numeric(w["position_market_value_jpy"], errors="coerce").fillna(0)
             bv = pd.to_numeric(enriched["book_value_net"], errors="coerce").fillna(0)
 
@@ -1012,11 +1012,14 @@ with tab_market:
                         info_cols[c] = stock_info_df[c]
                 unified = unified.merge(info_cols, on="コード", how="left")
 
+            # product_type マップ (code → product_type)
+            _pt_map = dict(zip(weighted["code"], weighted.get("product_type", pd.Series(dtype=str))))
+
             # 騰落率
             with st.spinner("全銘柄の騰落率を計算中..."):
                 chg_rows = []
                 for code in weighted["code"].unique():
-                    if not is_equity_code(code):
+                    if not is_equity_code(code, _pt_map.get(code)):
                         continue
                     chg = compute_price_changes(jq_client, code)
                     if chg:
@@ -1036,14 +1039,14 @@ with tab_market:
             with st.spinner("全銘柄の信用残を取得中..."):
                 margin_rows = []
                 for code in weighted["code"].unique():
-                    if not is_equity_code(code):
+                    if not is_equity_code(code, _pt_map.get(code)):
                         continue
                     try:
                         mdf = jq_client.get_margin_balance(code, weeks=4)
                         if not mdf.empty:
                             lat = mdf.iloc[-1]
                             margin_rows.append({
-                                "コード": code[:4] if is_equity_code(code) and len(code) == 5 else code,
+                                "コード": code[:4] if len(code) == 5 and code.isdigit() else code,
                                 "貸借倍率": lat.get("貸借倍率"),
                                 "買残増減(%)": lat.get("買残増減率(%)"),
                             })

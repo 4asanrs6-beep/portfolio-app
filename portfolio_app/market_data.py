@@ -22,12 +22,29 @@ BENCHMARK_LABELS = {
 }
 
 
-def is_equity_code(code: str) -> bool:
-    """通常の個別株コード (4〜5桁数字) かどうかを判定。先物・指数等を除外。"""
+def is_equity_code(code: str, product_type: str | None = None) -> bool:
+    """個別株/ETF かどうかを判定。先物・指数等を除外。
+
+    product_type が渡された場合はそれを優先 (「株指先」等なら False)。
+    渡されない場合はコード形式で推定。
+    """
+    if product_type is not None:
+        pt = str(product_type).strip()
+        # 先物・オプション系のキーワード
+        if any(k in pt for k in ["先", "OP", "オプション"]):
+            return False
+        if pt in ("株式", ""):
+            return True
+        return True  # 不明な場合は株式扱い
+
+    # product_type なし → コード形式で判定
     c = str(code).strip()
-    if not c.isdigit():
+    if not c.replace("-", "").replace(".", "").isalnum():
         return False
-    return 4 <= len(c) <= 5
+    # 9桁以上の数字コードは先物
+    if c.isdigit() and len(c) > 5:
+        return False
+    return True
 
 
 def classify_futures(code: str, name: str) -> str | None:
@@ -156,7 +173,9 @@ class JQuantsClient:
         end_date: str,
     ) -> pd.DataFrame:
         """個別銘柄の日足株価を取得。日付は YYYY-MM-DD。先物等は空 DataFrame。"""
-        if not is_equity_code(code):
+        # 9桁以上の数字コードは先物 → スキップ
+        c = str(code).strip()
+        if c.isdigit() and len(c) > 5:
             return pd.DataFrame()
 
         cache_key = f"stock_{code}_{start_date}_{end_date}"
@@ -279,7 +298,8 @@ class JQuantsClient:
 
     def get_stock_info(self, code: str) -> dict:
         """yfinance から銘柄の時価総額・需給・バリュエーション情報を取得。"""
-        if not is_equity_code(code):
+        c = str(code).strip()
+        if c.isdigit() and len(c) > 5:
             return {}
 
         cache_key = f"yf_info_{code}"
@@ -342,7 +362,8 @@ class JQuantsClient:
 
     def get_margin_balance(self, code: str, weeks: int = 8) -> pd.DataFrame:
         """信用残 (買残・売残・貸借倍率) の週次推移を取得。"""
-        if not is_equity_code(code):
+        c = str(code).strip()
+        if c.isdigit() and len(c) > 5:
             return pd.DataFrame()
 
         cache_key = f"margin_{code}_{weeks}"
@@ -401,7 +422,8 @@ def compute_price_changes(
     code: str,
 ) -> dict:
     """直近の騰落率を複数期間で計算。"""
-    if not is_equity_code(code):
+    c = str(code).strip()
+    if c.isdigit() and len(c) > 5:
         return {}
 
     end_date = datetime.now().date()
@@ -464,7 +486,8 @@ def fetch_portfolio_stock_info(
     """ポートフォリオ全銘柄の yfinance 情報をまとめて取得。先物等はスキップ。"""
     rows = []
     for code in codes:
-        if not is_equity_code(code):
+        c = str(code).strip()
+        if c.isdigit() and len(c) > 5:
             continue
         info = client.get_stock_info(code)
         if info:
@@ -744,7 +767,7 @@ def compute_portfolio_weights(snapshot_df: pd.DataFrame) -> pd.DataFrame:
     df["abs_weight_pct"] = df["abs_market_value"] / total_abs * 100
 
     cols = ["code", "name", "direction", "net_qty", "position_market_value_jpy", "book_value_net", "weight_pct", "abs_weight_pct"]
-    extra = [c for c in ["sector_33_name", "market_name"] if c in df.columns]
+    extra = [c for c in ["product_type", "sector_33_name", "market_name"] if c in df.columns]
     return df[cols + extra].sort_values("abs_weight_pct", ascending=False).reset_index(drop=True)
 
 
@@ -845,14 +868,18 @@ def compute_portfolio_all(
 
     # 銘柄別に株価取得 & 各期間×各ベンチマークでベータ計算
     stock_rows: list[dict] = []
-    unique_codes = weighted_df[["code", "name", "weight_pct", "abs_weight_pct", "direction"]].drop_duplicates(subset=["code"])
+    uc_cols = ["code", "name", "weight_pct", "abs_weight_pct", "direction"]
+    if "product_type" in weighted_df.columns:
+        uc_cols.append("product_type")
+    unique_codes = weighted_df[uc_cols].drop_duplicates(subset=["code"])
 
     # 最長期間分の株価を1回取得すれば全期間で使い回せる
     longest_start = (end_date - timedelta(days=365)).isoformat()
 
     for _, row in unique_codes.iterrows():
         code = row["code"]
-        if not is_equity_code(code):
+        pt = row.get("product_type")
+        if not is_equity_code(code, pt):
             # 先物・指数等 → 実測クロスベータを割り当て
             entry = {
                 "コード": code,
