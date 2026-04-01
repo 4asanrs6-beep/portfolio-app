@@ -831,7 +831,7 @@ with tab_trend:
             ))
 
             fig_pl.update_layout(**_chart_layout)
-            st.plotly_chart(fig_pl, use_container_width=True, config={"displayModeBar": False})
+            st.plotly_chart(fig_pl, width="stretch", config={"displayModeBar": False})
 
             # ---- 評価額推移チャート ----
             _latest_val = format_number(latest["評価額(円貨)"])
@@ -856,7 +856,7 @@ with tab_trend:
 
             val_layout = {**_chart_layout, "height": 300}
             fig_val.update_layout(**val_layout)
-            st.plotly_chart(fig_val, use_container_width=True, config={"displayModeBar": False})
+            st.plotly_chart(fig_val, width="stretch", config={"displayModeBar": False})
 
             # ---- 日次テーブル (差分付き) ----
             st.markdown('<div class="trend-section-title">日次データ</div>', unsafe_allow_html=True)
