@@ -680,6 +680,11 @@ with tab_trend:
         if view_df.empty:
             st.info("選択期間にデータがありません。")
         else:
+            # TR損益・実現損益は日次値 → 期間累計に変換
+            view_df = view_df.copy()
+            view_df["TR損益(累計)"] = view_df["TR損益"].cumsum()
+            view_df["実現損益(累計)"] = view_df["実現損益"].cumsum()
+
             latest = view_df.iloc[-1]
             prev = view_df.iloc[-2] if len(view_df) >= 2 else latest
             first = view_df.iloc[0]
@@ -700,8 +705,8 @@ with tab_trend:
                 sign = "+" if diff > 0 else ""
                 return f"期間変化: {sign}{format_number(diff)}"
 
-            d_tr, cls_tr, lbl_tr = _delta_info("TR損益")
-            d_real, cls_real, lbl_real = _delta_info("実現損益")
+            d_tr, cls_tr, lbl_tr = _delta_info("TR損益(累計)")
+            d_real, cls_real, lbl_real = _delta_info("実現損益(累計)")
             d_eval, cls_eval, lbl_eval = _delta_info("評価損益")
             d_val, cls_val, lbl_val = _delta_info("評価額(円貨)")
 
@@ -709,16 +714,16 @@ with tab_trend:
             st.markdown(f"""
             <div class="trend-kpi-row">
               <div class="trend-kpi accent-pl">
-                <div class="trend-kpi-label">TR損益</div>
-                <div class="trend-kpi-value">{format_number(latest["TR損益"])}</div>
+                <div class="trend-kpi-label">TR損益 (累計)</div>
+                <div class="trend-kpi-value">{format_number(latest["TR損益(累計)"])}</div>
                 <div class="trend-kpi-delta {cls_tr}">{d_tr} {lbl_tr}</div>
-                <div class="trend-kpi-sub">{_period_info("TR損益")}</div>
+                <div class="trend-kpi-sub">当日: {format_number(latest["TR損益"])}</div>
               </div>
               <div class="trend-kpi accent-real">
-                <div class="trend-kpi-label">実現損益</div>
-                <div class="trend-kpi-value">{format_number(latest["実現損益"])}</div>
+                <div class="trend-kpi-label">実現損益 (累計)</div>
+                <div class="trend-kpi-value">{format_number(latest["実現損益(累計)"])}</div>
                 <div class="trend-kpi-delta {cls_real}">{d_real} {lbl_real}</div>
-                <div class="trend-kpi-sub">{_period_info("実現損益")}</div>
+                <div class="trend-kpi-sub">当日: {format_number(latest["実現損益"])}</div>
               </div>
               <div class="trend-kpi accent-eval">
                 <div class="trend-kpi-label">評価損益</div>
@@ -772,25 +777,25 @@ with tab_trend:
             )
 
             # ---- 損益推移チャート (主役) ----
-            _latest_pl = format_number(latest["TR損益"])
+            _latest_pl = format_number(latest["TR損益(累計)"])
             st.markdown(
-                f'<div class="trend-section-title">TR損益推移 &nbsp;<span style="font-size:1.1em;color:var(--ink)">{_latest_pl}</span></div>',
+                f'<div class="trend-section-title">損益推移 (累計) &nbsp;<span style="font-size:1.1em;color:var(--ink)">TR {_latest_pl}</span></div>',
                 unsafe_allow_html=True,
             )
 
             fig_pl = go.Figure()
 
-            # 実現損益 — エリア (薄め背景)
+            # 実現損益(累計) — エリア (薄め背景)
             fig_pl.add_trace(go.Scatter(
-                x=view_df["snapshot_date"], y=view_df["実現損益"],
-                name="実現損益",
+                x=view_df["snapshot_date"], y=view_df["実現損益(累計)"],
+                name="実現損益(累計)",
                 mode="lines",
                 line=dict(color="rgba(2,132,199,0.5)", width=_line_sub),
                 fill="tozeroy", fillcolor="rgba(2,132,199,0.06)",
                 hovertemplate="%{y:,.0f}",
             ))
 
-            # 評価損益 — エリア (薄め背景)
+            # 評価損益 — エリア (日次値: ポジション含み益はその時点の値)
             fig_pl.add_trace(go.Scatter(
                 x=view_df["snapshot_date"], y=view_df["評価損益"],
                 name="評価損益",
@@ -800,10 +805,10 @@ with tab_trend:
                 hovertemplate="%{y:,.0f}",
             ))
 
-            # TR損益 — 主役の太い折れ線
+            # TR損益(累計) — 主役の太い折れ線
             fig_pl.add_trace(go.Scatter(
-                x=view_df["snapshot_date"], y=view_df["TR損益"],
-                name="TR損益",
+                x=view_df["snapshot_date"], y=view_df["TR損益(累計)"],
+                name="TR損益(累計)",
                 mode="lines+markers" if _show_markers else "lines",
                 line=dict(color="#c2410c", width=_line_main),
                 marker=dict(size=_marker_size, color="#c2410c", line=dict(width=1, color="white")) if _show_markers else None,
@@ -813,7 +818,7 @@ with tab_trend:
             # 損益合計 — 補助線
             fig_pl.add_trace(go.Scatter(
                 x=view_df["snapshot_date"], y=view_df["損益"],
-                name="損益合計",
+                name="損益合計(日次)",
                 mode="lines",
                 line=dict(color="#78716c", width=1.5, dash="dash"),
                 hovertemplate="%{y:,.0f}",
@@ -854,20 +859,21 @@ with tab_trend:
             table_df["snapshot_date"] = table_df["snapshot_date"].dt.strftime("%Y-%m-%d")
 
             # 差分列を追加
-            for col in ["損益", "実現損益", "評価損益", "評価額(円貨)", "件数"]:
+            for col in ["評価損益", "評価額(円貨)", "件数"]:
                 table_df[f"{col}_diff"] = view_df[col].diff()
 
-            display_cols = ["snapshot_date"]
-            for col in ["損益", "実現損益", "評価損益", "TR損益", "評価額(円貨)", "件数"]:
-                display_cols.append(col)
+            display_cols = ["snapshot_date", "TR損益", "TR損益(累計)", "実現損益", "実現損益(累計)", "評価損益"]
+            for col in ["評価損益", "評価額(円貨)", "件数"]:
                 diff_col = f"{col}_diff"
+                if col not in display_cols:
+                    display_cols.append(col)
                 if diff_col in table_df.columns:
                     display_cols.append(diff_col)
 
             table_display = table_df[[c for c in display_cols if c in table_df.columns]].rename(columns={
                 "snapshot_date": "日付",
-                "損益_diff": "損益(前日比)",
-                "実現損益_diff": "実現(前日比)",
+                "TR損益(累計)": "TR累計",
+                "実現損益(累計)": "実現累計",
                 "評価損益_diff": "評価(前日比)",
                 "評価額(円貨)_diff": "評価額(前日比)",
                 "件数_diff": "件数(増減)",
