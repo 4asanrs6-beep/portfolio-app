@@ -210,8 +210,15 @@ def compare_snapshots(current_df: pd.DataFrame, previous_df: pd.DataFrame) -> pd
             curr_qty = row["net_qty_curr"]
             return _unrealized(book_curr, last_curr, curr_qty) + realized
 
-        # 増し: 差分数量の含み損益 + 実現損益
+        # 増し: 新規分のエントリー価格を逆算して含み損益を計算
         if action in ("買い増し", "売り増し"):
+            book_prev = row["book_price_prev"]
+            qty_prev = row["net_qty_prev"]
+            qty_curr = row["net_qty_curr"]
+            # 新規分エントリー = (当日簿価×当日数量 - 前日簿価×前日数量) / 差分数量
+            if book_prev and book_curr and qty_diff != 0:
+                new_entry = (book_curr * abs(qty_curr) - book_prev * abs(qty_prev)) / abs(qty_diff)
+                return _unrealized(new_entry, last_curr, qty_diff) + realized
             return _unrealized(book_curr, last_curr, qty_diff) + realized
 
         # 返済: 実現損益
