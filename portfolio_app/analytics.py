@@ -182,19 +182,55 @@ def compare_snapshots(current_df: pd.DataFrame, previous_df: pd.DataFrame) -> pd
     merged["direction"] = merged["direction_curr"].fillna(merged["direction_prev"]).fillna("フラット")
     merged["quantity_change"] = merged["net_qty_prev"].astype(int).astype(str) + " -> " + merged["net_qty_curr"].astype(int).astype(str)
 
-    # 勝敗判定: TR損益差分がプラスなら勝ち
+    # アクション分の損益を推定
+    def _action_pl(row):
+        action = row["action_type"]
+        realized = row["realized_pl_curr"]
+        qty_diff = row["qty_diff"]
+        book_curr = row["book_price_curr"]
+        last_curr = row["last_price_curr"]
+
+        # デイトレ・解消: 実現損益がそのままアクションの結果
+        if action in ("デイトレ", "買い解消", "売り解消"):
+            return realized
+
+        # 新規: 含み損益 = (時価 - 簿価) × 数量
+        if action in ("新規買い", "新規売り"):
+            if book_curr and last_curr and qty_diff != 0:
+                return (last_curr - book_curr) * abs(qty_diff)
+            return row["unrealized_pl_curr"]
+
+        # 増し・返済・ドテン: 差分数量の含み損益 + 実現損益
+        if action in ("買い増し", "売り増し"):
+            # 新規分: (時価 - 簿価) × 追加数量 (簿価は平均に変わっているので近似)
+            if book_curr and last_curr and qty_diff != 0:
+                new_pl = (last_curr - book_curr) * abs(qty_diff)
+                return new_pl + realized
+            return realized
+
+        if action in ("買い返済", "売り返済"):
+            return realized
+
+        if action in ("ドテン買い", "ドテン売り"):
+            return realized + row.get("unrealized_pl_curr", 0)
+
+        return row["tr_pl_diff"]
+
+    merged["action_pl"] = merged.apply(_action_pl, axis=1)
+
+    # 勝敗判定: アクション分損益で判定
     def _judge(row):
-        tr = row["tr_pl_diff"]
-        if tr > 0:
+        pl = row["action_pl"]
+        if pl > 0:
             return "Win"
-        elif tr < 0:
+        elif pl < 0:
             return "Lose"
         return "Even"
 
     merged["result"] = merged.apply(_judge, axis=1)
 
     cols = [
-        "action_type", "result",
+        "action_type", "result", "action_pl",
         "id_name", "code", "name", "account_category", "product_type",
         "direction", "quantity_change",
         "net_qty_prev", "net_qty_curr", "qty_diff",
@@ -213,6 +249,7 @@ def compare_snapshots(current_df: pd.DataFrame, previous_df: pd.DataFrame) -> pd
             columns={
                 "action_type": "当日アクション",
                 "result": "勝敗",
+                "action_pl": "アクション損益",
                 "id_name": "ID名",
                 "code": "コード",
                 "name": "銘柄名",
@@ -248,16 +285,20 @@ def build_action_summary(compared_df: pd.DataFrame) -> pd.DataFrame:
     if compared_df.empty:
         return pd.DataFrame(columns=["当日アクション", "件数"])
 
+    agg_dict = {
+        "件数": ("コード", "count"),
+        "Win": ("勝敗", lambda x: (x == "Win").sum()),
+        "Lose": ("勝敗", lambda x: (x == "Lose").sum()),
+        "Even": ("勝敗", lambda x: (x == "Even").sum()),
+    }
+    if "アクション損益" in compared_df.columns:
+        agg_dict["アクション損益合計"] = ("アクション損益", "sum")
+    if "実現損益差分" in compared_df.columns:
+        agg_dict["実現損益合計"] = ("実現損益差分", "sum")
+
     summary = (
         compared_df.groupby("当日アクション", dropna=False)
-        .agg(
-            件数=("コード", "count"),
-            Win=("勝敗", lambda x: (x == "Win").sum()),
-            Lose=("勝敗", lambda x: (x == "Lose").sum()),
-            Even=("勝敗", lambda x: (x == "Even").sum()),
-            TR損益合計=("TR損益差分", "sum"),
-            実現損益合計=("実現損益差分", "sum"),
-        )
+        .agg(**agg_dict)
         .reset_index()
     )
     summary["勝率"] = summary.apply(

@@ -907,7 +907,7 @@ with tab_actions:
             wins = int((real_actions["勝敗"] == "Win").sum()) if "勝敗" in real_actions.columns else 0
             losses = int((real_actions["勝敗"] == "Lose").sum()) if "勝敗" in real_actions.columns else 0
             win_rate = f"{wins / (wins + losses) * 100:.0f}%" if (wins + losses) > 0 else "-"
-            tr_total = real_actions["TR損益差分"].sum() if "TR損益差分" in real_actions.columns else 0
+            action_pl_total = real_actions["アクション損益"].sum() if "アクション損益" in real_actions.columns else 0
             real_total = real_actions["実現損益差分"].sum() if "実現損益差分" in real_actions.columns else 0
 
             st.markdown(f"""
@@ -923,8 +923,9 @@ with tab_actions:
                 <div class="trend-kpi-sub">勝率: {win_rate}</div>
               </div>
               <div class="trend-kpi accent-eval">
-                <div class="trend-kpi-label">TR損益 (当日アクション分)</div>
-                <div class="trend-kpi-value">{_colored(tr_total)}</div>
+                <div class="trend-kpi-label">アクション損益</div>
+                <div class="trend-kpi-value">{_colored(action_pl_total)}</div>
+                <div class="trend-kpi-sub">新規/増減分のみ</div>
               </div>
               <div class="trend-kpi accent-val">
                 <div class="trend-kpi-label">実現損益 (当日アクション分)</div>
@@ -946,7 +947,7 @@ with tab_actions:
 
             # 表示列を絞って見やすく
             display_cols = [c for c in [
-                "当日アクション", "勝敗", "コード", "銘柄名", "方向",
+                "当日アクション", "勝敗", "アクション損益", "コード", "銘柄名", "方向",
                 "数量変化", "前日簿価", "当日簿価", "前日時価", "当日時価",
                 "TR損益差分", "実現損益差分", "評価損益差分", "評価額差分",
             ] if c in filtered.columns]
