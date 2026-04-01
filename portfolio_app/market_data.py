@@ -46,13 +46,51 @@ def classify_futures(code: str, name: str) -> str | None:
     return None
 
 
-# 先物の想定ベータ
-FUTURES_BETA: dict[str, dict[str, float]] = {
-    "TOPIX": {"β(TOPIX)": 1.0, "β(T3M)": 1.0, "β(T6M)": 1.0, "β(T12M)": 1.0,
-              "β(N3M)": None, "β(N6M)": None, "β(N12M)": None},
-    "NK225": {"β(TOPIX)": None, "β(T3M)": None, "β(T6M)": None, "β(T12M)": None,
-              "β(N3M)": 1.0, "β(N6M)": 1.0, "β(N12M)": 1.0},
-}
+def compute_futures_cross_betas(
+    client: "JQuantsClient",
+    periods: list[tuple[str, int]],
+) -> dict[str, dict[str, float]]:
+    """日経 vs TOPIX のクロスベータを各期間で実測し、先物ベータを構築する。
+
+    Returns: {"TOPIX": {β列名: 値, ...}, "NK225": {β列名: 値, ...}}
+    """
+    end_date = datetime.now().date()
+    end_str = end_date.isoformat()
+
+    result: dict[str, dict[str, float]] = {"TOPIX": {}, "NK225": {}}
+
+    for label, days in periods:
+        start = (end_date - timedelta(days=days)).isoformat()
+        try:
+            topix_df = client.get_benchmark_prices("TOPIX", start, end_str)
+            nikkei_df = client.get_benchmark_prices("日経平均", start, end_str)
+        except Exception:
+            continue
+
+        if topix_df.empty or nikkei_df.empty:
+            continue
+
+        # 日経の対TOPIXベータ
+        m_nk_vs_tp = compute_stock_metrics(nikkei_df, topix_df)
+        # TOPIXの対日経ベータ
+        m_tp_vs_nk = compute_stock_metrics(topix_df, nikkei_df)
+
+        nk_topix_beta = m_nk_vs_tp.get("ベータ")  # 日経先物の TOPIX ベータ
+        tp_nikkei_beta = m_tp_vs_nk.get("ベータ")  # TOPIX先物の 日経ベータ
+
+        # TOPIX先物: β(TOPIX)=1.0, β(日経)=実測値
+        result["TOPIX"][f"β(T{label})"] = 1.0
+        result["TOPIX"][f"β(N{label})"] = tp_nikkei_beta
+
+        # 日経先物: β(TOPIX)=実測値, β(日経)=1.0
+        result["NK225"][f"β(T{label})"] = nk_topix_beta
+        result["NK225"][f"β(N{label})"] = 1.0
+
+    # メイン期間用のβ(TOPIX)も設定
+    result["TOPIX"]["β(TOPIX)"] = 1.0
+    result["NK225"]["β(TOPIX)"] = result["NK225"].get("β(T12M)") or result["NK225"].get("β(T6M)")
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -787,6 +825,9 @@ def compute_portfolio_all(
     main_start = (end_date - timedelta(days=days)).isoformat()
     topix_main = client.get_benchmark_prices("TOPIX", main_start, end_str) if days else pd.DataFrame()
 
+    # 先物のクロスベータを実測
+    futures_betas = compute_futures_cross_betas(client, beta_periods)
+
     # 銘柄別に株価取得 & 各期間×各ベンチマークでベータ計算
     stock_rows: list[dict] = []
     unique_codes = weighted_df[["code", "name", "weight_pct", "abs_weight_pct", "direction"]].drop_duplicates(subset=["code"])
@@ -797,7 +838,7 @@ def compute_portfolio_all(
     for _, row in unique_codes.iterrows():
         code = row["code"]
         if not is_equity_code(code):
-            # 先物・指数等 → 種別からベータを割り当て
+            # 先物・指数等 → 実測クロスベータを割り当て
             entry = {
                 "コード": code,
                 "銘柄名": row["name"],
@@ -806,10 +847,10 @@ def compute_portfolio_all(
                 "絶対ウェイト(%)": round(row["abs_weight_pct"], 2),
             }
             fut_type = classify_futures(code, row["name"])
-            if fut_type and fut_type in FUTURES_BETA:
-                for k, v in FUTURES_BETA[fut_type].items():
+            if fut_type and fut_type in futures_betas:
+                for k, v in futures_betas[fut_type].items():
                     entry[k] = v
-                entry["備考"] = f"{fut_type}先物 β=1.0"
+                entry["備考"] = f"{fut_type}先物"
             else:
                 entry["備考"] = "先物(種別不明)"
             stock_rows.append(entry)
