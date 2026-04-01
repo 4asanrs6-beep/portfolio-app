@@ -236,7 +236,10 @@ def compare_snapshots(current_df: pd.DataFrame, previous_df: pd.DataFrame) -> pd
 
     # TR損益を既存分 / 新規分に分解
     merged["tr_pl_new"] = merged["action_pl"]
-    merged["tr_pl_existing"] = merged["tr_pl_diff"] - merged["action_pl"]
+    merged["tr_pl_existing"] = merged.apply(
+        lambda r: 0.0 if r["action_type"] in ("デイトレ", "新規買い", "新規売り") else r["tr_pl_diff"] - r["action_pl"],
+        axis=1,
+    )
 
     # 勝敗判定: アクション分損益で判定
     def _judge(row):
