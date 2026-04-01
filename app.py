@@ -949,7 +949,8 @@ with tab_actions:
             display_cols = [c for c in [
                 "当日アクション", "勝敗", "アクション損益", "コード", "銘柄名", "方向",
                 "数量変化", "前日簿価", "当日簿価", "前日時価", "当日時価",
-                "TR損益差分", "実現損益差分", "評価損益差分", "評価額差分",
+                "TR損益差分", "TR(新規分)", "TR(既存分)",
+                "実現損益差分", "評価損益差分", "評価額差分",
             ] if c in filtered.columns]
             st.dataframe(format_display_table(filtered[display_cols]), width="stretch", hide_index=True)
 

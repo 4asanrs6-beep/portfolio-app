@@ -234,6 +234,10 @@ def compare_snapshots(current_df: pd.DataFrame, previous_df: pd.DataFrame) -> pd
 
     merged["action_pl"] = merged.apply(_action_pl, axis=1)
 
+    # TR損益を既存分 / 新規分に分解
+    merged["tr_pl_new"] = merged["action_pl"]
+    merged["tr_pl_existing"] = merged["tr_pl_diff"] - merged["action_pl"]
+
     # 勝敗判定: アクション分損益で判定
     def _judge(row):
         pl = row["action_pl"]
@@ -253,7 +257,7 @@ def compare_snapshots(current_df: pd.DataFrame, previous_df: pd.DataFrame) -> pd
         "book_price_prev", "book_price_curr",
         "last_price_prev", "last_price_curr",
         "market_value_prev", "market_value_curr", "market_value_diff",
-        "tr_pl_curr", "tr_pl_diff",
+        "tr_pl_curr", "tr_pl_diff", "tr_pl_new", "tr_pl_existing",
         "realized_pl_diff", "unrealized_pl_diff",
         "net_pl_prev", "net_pl_curr", "net_pl_diff",
     ]
@@ -285,6 +289,8 @@ def compare_snapshots(current_df: pd.DataFrame, previous_df: pd.DataFrame) -> pd
                 "market_value_diff": "評価額差分",
                 "tr_pl_curr": "TR損益",
                 "tr_pl_diff": "TR損益差分",
+                "tr_pl_new": "TR(新規分)",
+                "tr_pl_existing": "TR(既存分)",
                 "realized_pl_diff": "実現損益差分",
                 "unrealized_pl_diff": "評価損益差分",
                 "net_pl_prev": "前日損益",
