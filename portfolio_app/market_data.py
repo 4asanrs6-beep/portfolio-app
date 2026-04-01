@@ -101,7 +101,9 @@ class JQuantsClient:
     """jquantsapi.ClientV2 の薄いラッパー (レート制限対策 + セッションキャッシュ付き)"""
 
     # API呼び出し間隔 (秒) — J-Quants Free/Light プランのレート制限対策
-    API_INTERVAL = 0.35
+    API_INTERVAL = 0.5
+    MAX_RETRIES = 3
+    RETRY_WAIT = 5  # 429 時の待機秒数
 
     def __init__(self, api_key: str | None = None):
         self.api_key = api_key or os.getenv("JQUANTS_API_KEY", "")
@@ -115,6 +117,20 @@ class JQuantsClient:
         if elapsed < self.API_INTERVAL:
             time.sleep(self.API_INTERVAL - elapsed)
         self._last_call = time.time()
+
+    def _call_with_retry(self, func, *args, **kwargs):
+        """429 エラー時にリトライする汎用ラッパー。"""
+        for attempt in range(self.MAX_RETRIES):
+            self._throttle()
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                if "429" in str(e) and attempt < self.MAX_RETRIES - 1:
+                    wait = self.RETRY_WAIT * (attempt + 1)
+                    logger.info("429 レート制限 — %d秒待機後リトライ (%d/%d)", wait, attempt + 1, self.MAX_RETRIES)
+                    time.sleep(wait)
+                else:
+                    raise
 
     def _get_client(self):
         if self._client is None:
@@ -147,9 +163,9 @@ class JQuantsClient:
         if cache_key in self._cache:
             return self._cache[cache_key]
 
-        self._throttle()
         client = self._get_client()
-        df = client.get_eq_bars_daily(
+        df = self._call_with_retry(
+            client.get_eq_bars_daily,
             code=code,
             from_yyyymmdd=start_date.replace("-", ""),
             to_yyyymmdd=end_date.replace("-", ""),
@@ -179,14 +195,13 @@ class JQuantsClient:
         if cache_key in self._cache:
             return self._cache[cache_key]
 
-        self._throttle()
         client = self._get_client()
         kwargs: dict = {"code": index_code}
         if start_date:
             kwargs["from_yyyymmdd"] = start_date.replace("-", "")
         if end_date:
             kwargs["to_yyyymmdd"] = end_date.replace("-", "")
-        df = client.get_idx_bars_daily(**kwargs)
+        df = self._call_with_retry(client.get_idx_bars_daily, **kwargs)
         column_map = {
             "Date": "date", "Code": "index_code",
             "O": "open", "H": "high", "L": "low", "C": "close",
@@ -247,9 +262,8 @@ class JQuantsClient:
     def get_listed_stocks(self) -> pd.DataFrame:
         if "listed_stocks" in self._cache:
             return self._cache["listed_stocks"]
-        self._throttle()
         client = self._get_client()
-        df = client.get_list()
+        df = self._call_with_retry(client.get_list)
         column_map = {
             "Code": "code", "CoName": "name",
             "S17Nm": "sector_17_name",
@@ -341,10 +355,10 @@ class JQuantsClient:
 
         code5 = code if len(code) == 5 else code + "0"
 
-        self._throttle()
         client = self._get_client()
         try:
-            df = client.get_mkt_margin_interest(
+            df = self._call_with_retry(
+                client.get_mkt_margin_interest,
                 code=code5,
                 from_yyyymmdd=start_date.replace("-", ""),
                 to_yyyymmdd=end_str.replace("-", ""),
