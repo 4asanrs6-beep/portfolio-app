@@ -118,15 +118,16 @@ class JQuantsClient:
     """jquantsapi.ClientV2 の薄いラッパー (レート制限対策 + セッションキャッシュ付き)"""
 
     # API呼び出し間隔 (秒) — J-Quants Free/Light プランのレート制限対策
-    API_INTERVAL = 0.5
-    MAX_RETRIES = 3
-    RETRY_WAIT = 5  # 429 時の待機秒数
+    API_INTERVAL = 1.0
+    MAX_RETRIES = 5
+    RETRY_WAIT = 10  # 429 時の待機秒数
 
     def __init__(self, api_key: str | None = None):
         self.api_key = api_key or os.getenv("JQUANTS_API_KEY", "")
         self._client = None
         self._last_call: float = 0.0
         self._cache: dict[str, pd.DataFrame] = {}
+        self._fail_cache: set[str] = set()
 
     def _throttle(self) -> None:
         """連続呼び出しを抑制。"""
@@ -146,6 +147,7 @@ class JQuantsClient:
                     wait = self.RETRY_WAIT * (attempt + 1)
                     logger.info("429 レート制限 — %d秒待機後リトライ (%d/%d)", wait, attempt + 1, self.MAX_RETRIES)
                     time.sleep(wait)
+                    self._last_call = time.time()
                 else:
                     raise
 
@@ -181,14 +183,20 @@ class JQuantsClient:
         cache_key = f"stock_{code}_{start_date}_{end_date}"
         if cache_key in self._cache:
             return self._cache[cache_key]
+        if cache_key in self._fail_cache:
+            return pd.DataFrame()
 
         client = self._get_client()
-        df = self._call_with_retry(
-            client.get_eq_bars_daily,
-            code=code,
-            from_yyyymmdd=start_date.replace("-", ""),
-            to_yyyymmdd=end_date.replace("-", ""),
-        )
+        try:
+            df = self._call_with_retry(
+                client.get_eq_bars_daily,
+                code=code,
+                from_yyyymmdd=start_date.replace("-", ""),
+                to_yyyymmdd=end_date.replace("-", ""),
+            )
+        except Exception:
+            self._fail_cache.add(cache_key)
+            raise
         column_map = {
             "Date": "date", "Code": "code",
             "O": "open", "H": "high", "L": "low", "C": "close", "Vo": "volume",
@@ -369,6 +377,8 @@ class JQuantsClient:
         cache_key = f"margin_{code}_{weeks}"
         if cache_key in self._cache:
             return self._cache[cache_key]
+        if cache_key in self._fail_cache:
+            return pd.DataFrame()
 
         end_date = datetime.now().date()
         start_date = (end_date - timedelta(weeks=weeks)).isoformat()
@@ -386,6 +396,7 @@ class JQuantsClient:
             )
         except Exception as e:
             logger.warning("信用残取得失敗 (%s): %s", code, e)
+            self._fail_cache.add(cache_key)
             return pd.DataFrame()
 
         if df is None or df.empty:
