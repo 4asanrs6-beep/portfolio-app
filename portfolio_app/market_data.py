@@ -14,12 +14,16 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 # ベンチマーク定義
-Benchmark = Literal["TOPIX", "日経平均"]
+Benchmark = Literal["TOPIX", "日経平均", "グロース250"]
 
 BENCHMARK_LABELS = {
     "TOPIX": "TOPIX",
     "日経平均": "日経平均株価",
+    "グロース250": "東証グロース市場250指数",
 }
+
+# J-Quants 指数コード
+INDEX_CODE_GROWTH250 = "0070"  # 東証グロース市場250指数 (旧 東証マザーズ指数)
 
 
 def is_equity_code(code: str, product_type: str | None = None) -> bool:
@@ -48,17 +52,27 @@ def is_equity_code(code: str, product_type: str | None = None) -> bool:
 
 
 def classify_futures(code: str, name: str) -> str | None:
-    """先物の銘柄名から種別を推定。None なら不明。"""
-    n = str(name).upper()
-    if any(k in n for k in ["TOPIX", "トピックス", "TP", "TOPS"]):
+    """先物の銘柄名から種別を推定。None なら不明。
+
+    銘柄名末尾の限月コード (例: ``-606`` / ``606``) は除去し、商品プレフィックス
+    のみで判定する。``Mi`` プレフィックスは「ミニ」の意味なので剥がしてから残り
+    部分でマッチさせる。
+    """
+    import re
+
+    n = str(name).strip()
+    # 末尾 3桁の限月 (任意で - を伴う) を除去
+    n = re.sub(r"-?\d{3}$", "", n)
+    # 先頭の "Mi" (ミニ) を剥がす
+    if n.startswith("Mi"):
+        n = n[2:]
+    nu = n.upper()
+
+    if nu.startswith("G250") or "グロース" in nu or "GROWTH" in nu:
+        return "GROWTH"
+    if nu.startswith("TPX") or nu.startswith("TOPIX") or nu.startswith("TOS") or "トピックス" in nu:
         return "TOPIX"
-    if any(k in n for k in ["日経", "NK", "N225", "NI225", "ミニ日経", "MIN"]):
-        return "NK225"
-    # MiN = ミニ日経, MiT = ミニTOPIX 等のコード体系
-    n_lower = str(name)
-    if n_lower.startswith("MiT") or n_lower.startswith("ToS"):
-        return "TOPIX"
-    if n_lower.startswith("MiN") or n_lower.startswith("NiK"):
+    if nu.startswith("N2") or nu.startswith("NK") or nu.startswith("NI") or "日経" in nu:
         return "NK225"
     return None
 
@@ -67,14 +81,14 @@ def compute_futures_cross_betas(
     client: "JQuantsClient",
     periods: list[tuple[str, int]],
 ) -> dict[str, dict[str, float]]:
-    """日経 vs TOPIX のクロスベータを各期間で実測し、先物ベータを構築する。
+    """日経・グロース vs TOPIX のクロスベータを各期間で実測し、先物ベータを構築する。
 
-    Returns: {"TOPIX": {β列名: 値, ...}, "NK225": {β列名: 値, ...}}
+    Returns: {"TOPIX": {...}, "NK225": {...}, "GROWTH": {...}}
     """
     end_date = datetime.now().date()
     end_str = end_date.isoformat()
 
-    result: dict[str, dict[str, float]] = {"TOPIX": {}, "NK225": {}}
+    result: dict[str, dict[str, float]] = {"TOPIX": {}, "NK225": {}, "GROWTH": {}}
 
     for label, days in periods:
         start = (end_date - timedelta(days=days)).isoformat()
@@ -82,7 +96,15 @@ def compute_futures_cross_betas(
             topix_df = client.get_benchmark_prices("TOPIX", start, end_str)
             nikkei_df = client.get_benchmark_prices("日経平均", start, end_str)
         except Exception:
-            continue
+            topix_df = pd.DataFrame()
+            nikkei_df = pd.DataFrame()
+
+        # グロース250 は別途取得 (失敗しても他は処理続行)
+        try:
+            growth_df = client.get_benchmark_prices("グロース250", start, end_str)
+        except Exception as e:
+            logger.warning("グロース250(%s) 取得失敗: %s", label, e)
+            growth_df = pd.DataFrame()
 
         if topix_df.empty or nikkei_df.empty:
             continue
@@ -103,9 +125,21 @@ def compute_futures_cross_betas(
         result["NK225"][f"β(T{label})"] = nk_topix_beta
         result["NK225"][f"β(N{label})"] = 1.0
 
+        # グロース250先物: β(TOPIX)・β(日経) ともに実測
+        if not growth_df.empty:
+            m_gr_vs_tp = compute_stock_metrics(growth_df, topix_df)
+            m_gr_vs_nk = compute_stock_metrics(growth_df, nikkei_df)
+            gr_topix_beta = m_gr_vs_tp.get("ベータ")
+            gr_nikkei_beta = m_gr_vs_nk.get("ベータ")
+            if gr_topix_beta is not None:
+                result["GROWTH"][f"β(T{label})"] = gr_topix_beta
+            if gr_nikkei_beta is not None:
+                result["GROWTH"][f"β(N{label})"] = gr_nikkei_beta
+
     # メイン期間用のβ(TOPIX)も設定
     result["TOPIX"]["β(TOPIX)"] = 1.0
     result["NK225"]["β(TOPIX)"] = result["NK225"].get("β(T12M)") or result["NK225"].get("β(T6M)")
+    result["GROWTH"]["β(TOPIX)"] = result["GROWTH"].get("β(T12M)") or result["GROWTH"].get("β(T6M)")
 
     return result
 
@@ -281,6 +315,8 @@ class JQuantsClient:
                 start_date or "2020-01-01",
                 end_date or datetime.now().date().isoformat(),
             )
+        if benchmark == "グロース250":
+            return self.get_index_prices(INDEX_CODE_GROWTH250, start_date, end_date)
         # デフォルト TOPIX
         return self.get_index_prices("0000", start_date, end_date)
 
@@ -900,10 +936,11 @@ def compute_portfolio_all(
                 "絶対ウェイト(%)": round(row["abs_weight_pct"], 2),
             }
             fut_type = classify_futures(code, row["name"])
-            if fut_type and fut_type in futures_betas:
+            if fut_type and fut_type in futures_betas and futures_betas[fut_type]:
                 for k, v in futures_betas[fut_type].items():
                     entry[k] = v
-                entry["備考"] = f"{fut_type}先物"
+                fut_label = {"TOPIX": "TOPIX", "NK225": "日経225", "GROWTH": "グロース250"}.get(fut_type, fut_type)
+                entry["備考"] = f"{fut_label}先物"
             else:
                 entry["備考"] = "先物(種別不明)"
             stock_rows.append(entry)
