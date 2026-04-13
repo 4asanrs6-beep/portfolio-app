@@ -659,7 +659,10 @@ with tab_import:
 
     if st.button("保存する", type="primary", disabled=not positions):
         replace_snapshot(snapshot_date.isoformat(), raw_text, positions, note)
-        st.success(f"{snapshot_date.isoformat()} のデータを保存しました。")
+        st.session_state.clear()
+        st.cache_data.clear()
+        st.toast(f"{snapshot_date.isoformat()} のデータを保存しました。")
+        st.rerun()
 
 all_df = load_all_snapshots()
 snapshot_dates = list_snapshot_dates()
@@ -1377,7 +1380,7 @@ with tab_market:
                     f"損失限度: {format_number(l_lim)}円",
                 ]
             copy_text = "\n".join(copy_lines)
-            st.text_area("コピー用サマリ", value=copy_text, height=280, key="portfolio_copy")
+            st.text_area("コピー用サマリ", value=copy_text, height=280)
 
             # --- セクター構成 ---
             sector_df = compute_sector_breakdown(weighted)
@@ -1478,7 +1481,7 @@ with tab_market:
                 )
             with col_cp:
                 tsv_text = unified.to_csv(index=False, sep="\t")
-                st.text_area("銘柄一覧 (コピー用TSV)", value=tsv_text, height=200, key="metrics_copy")
+                st.text_area("銘柄一覧 (コピー用TSV)", value=tsv_text, height=200)
 
         # ================================================================
         # 個別銘柄ドリルダウン
