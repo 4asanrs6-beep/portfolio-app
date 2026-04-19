@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from portfolio_app.parser import ParsedPosition
+from portfolio_app.parser import ParsedPosition, ParsedTrade
 
 
 DB_PATH = Path("portfolio.db")
@@ -120,6 +120,39 @@ CREATE TABLE IF NOT EXISTS risk_limits (
     note TEXT,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS trade_imports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_date TEXT NOT NULL,
+    imported_at TEXT NOT NULL,
+    raw_text TEXT NOT NULL,
+    record_count INTEGER NOT NULL,
+    note TEXT
+);
+
+CREATE TABLE IF NOT EXISTS trade_executions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    import_id INTEGER NOT NULL,
+    trade_date TEXT NOT NULL,
+    executed_at TEXT,
+    code TEXT NOT NULL,
+    name TEXT NOT NULL,
+    market TEXT,
+    side TEXT NOT NULL,
+    price REAL NOT NULL,
+    quantity INTEGER NOT NULL,
+    trade_no TEXT,
+    receipt_no TEXT,
+    fill_flag TEXT,
+    internal_no TEXT,
+    price_sign TEXT,
+    raw_row TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (import_id) REFERENCES trade_imports (id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_trade_executions_date ON trade_executions (trade_date);
+CREATE INDEX IF NOT EXISTS idx_trade_executions_code ON trade_executions (code);
 """
 
 REQUIRED_COLUMNS = {
@@ -427,3 +460,83 @@ def list_risk_limit_months() -> list[str]:
             "SELECT month FROM risk_limits ORDER BY month DESC"
         ).fetchall()
     return [row["month"] for row in rows]
+
+
+# ---------------------------------------------------------------------------
+# 約定履歴 (trade_executions)
+# ---------------------------------------------------------------------------
+
+def replace_trade_executions(
+    trade_date: str,
+    raw_text: str,
+    trades: list[ParsedTrade],
+    note: str = "",
+) -> int:
+    imported_at = datetime.now().isoformat(timespec="seconds")
+    with get_connection() as conn:
+        conn.execute("DELETE FROM trade_executions WHERE trade_date = ?", (trade_date,))
+        conn.execute("DELETE FROM trade_imports WHERE trade_date = ?", (trade_date,))
+        cursor = conn.execute(
+            """
+            INSERT INTO trade_imports (trade_date, imported_at, raw_text, record_count, note)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (trade_date, imported_at, raw_text, len(trades), note),
+        )
+        import_id = int(cursor.lastrowid)
+        conn.executemany(
+            """
+            INSERT INTO trade_executions (
+                import_id, trade_date, executed_at, code, name, market, side,
+                price, quantity, trade_no, receipt_no, fill_flag, internal_no,
+                price_sign, raw_row, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    import_id,
+                    t.trade_date or trade_date,
+                    t.executed_at,
+                    t.code,
+                    t.name,
+                    t.market,
+                    t.side,
+                    t.price,
+                    t.quantity,
+                    t.trade_no,
+                    t.receipt_no,
+                    t.fill_flag,
+                    t.internal_no,
+                    t.price_sign,
+                    t.raw_row,
+                    imported_at,
+                )
+                for t in trades
+            ],
+        )
+    return import_id
+
+
+def list_trade_dates() -> list[str]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT trade_date FROM trade_executions ORDER BY trade_date DESC"
+        ).fetchall()
+    return [row["trade_date"] for row in rows]
+
+
+def load_trades_by_date(trade_date: str) -> pd.DataFrame:
+    with get_connection() as conn:
+        return pd.read_sql_query(
+            "SELECT * FROM trade_executions WHERE trade_date = ? ORDER BY executed_at, id",
+            conn,
+            params=(trade_date,),
+        )
+
+
+def load_all_trades() -> pd.DataFrame:
+    with get_connection() as conn:
+        return pd.read_sql_query(
+            "SELECT * FROM trade_executions ORDER BY trade_date, executed_at, id",
+            conn,
+        )

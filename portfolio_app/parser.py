@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import asdict, dataclass
+from datetime import datetime
 
 
 CODE_RE = re.compile(r"^\d{4}[A-Z]?$")
@@ -511,3 +512,157 @@ def parse_positions(raw_text: str) -> list[ParsedPosition]:
         except Exception:
             continue
     return positions
+
+
+# ================================================================
+# 約定履歴 (trade executions) parser
+# ================================================================
+
+# normalize_text が長音符(ー) を "-" に変換するため、検出用はハイフン表記で統一
+TRADE_HEADER_ALIASES = {
+    "約定時間": "executed_at",
+    "銘柄名": "name",
+    "約定値段": "price",
+    "約定数量": "quantity",
+    "銘柄コ-ド": "code",
+    "約定番号": "trade_no",
+    "市場": "market",
+    "受付番号": "receipt_no",
+    "出来": "fill_flag",
+    "社内処理番号": "internal_no",
+    "売買": "side",
+    "値段符号": "price_sign",
+}
+
+TRADE_REQUIRED_HEADERS = {"約定時間", "銘柄名", "約定値段", "約定数量", "銘柄コ-ド", "売買"}
+
+
+@dataclass
+class ParsedTrade:
+    executed_at: str | None  # ISO "YYYY-MM-DDTHH:MM:SS" or None
+    trade_date: str | None  # "YYYY-MM-DD" derived from executed_at
+    code: str
+    name: str
+    market: str
+    side: str  # 買 / 売
+    price: float
+    quantity: int
+    trade_no: str
+    receipt_no: str
+    fill_flag: str
+    internal_no: str
+    price_sign: str
+    raw_row: str
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+
+def _parse_trade_datetime(value: str) -> tuple[str | None, str | None]:
+    """`2026/4/16 15:30` 形式を ISO datetime と YYYY-MM-DD に変換。失敗時は (None, None)。"""
+    text = normalize_text(value)
+    if not text:
+        return None, None
+    for fmt in ("%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            dt = datetime.strptime(text, fmt)
+            return dt.strftime("%Y-%m-%dT%H:%M:%S"), dt.strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    # 日付のみ
+    for fmt in ("%Y/%m/%d", "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(text, fmt)
+            return dt.strftime("%Y-%m-%dT00:00:00"), dt.strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return None, None
+
+
+def _parse_trade_number(value: str) -> float:
+    text = normalize_text(value).replace(",", "")
+    if not text:
+        return 0.0
+    try:
+        return float(text)
+    except ValueError:
+        return 0.0
+
+
+def _parse_trade_int(value: str) -> int:
+    text = normalize_text(value).replace(",", "")
+    if not text:
+        return 0
+    try:
+        return int(float(text))
+    except ValueError:
+        return 0
+
+
+def is_trade_tsv(raw_text: str) -> bool:
+    lines = [line for line in raw_text.splitlines() if line.strip()]
+    if not lines:
+        return False
+    header_cells = [normalize_text(c) for c in lines[0].split("\t")]
+    return TRADE_REQUIRED_HEADERS.issubset(set(header_cells))
+
+
+def parse_trade_tsv(raw_text: str, fallback_date: str | None = None) -> list[ParsedTrade]:
+    """TSV 形式の約定履歴を ParsedTrade のリストに変換。
+
+    fallback_date: executed_at に日付が含まれない場合に使う YYYY-MM-DD。
+    """
+    lines = [line for line in raw_text.splitlines() if line.strip()]
+    if not lines:
+        return []
+    header_cells = [normalize_text(c) for c in lines[0].split("\t")]
+    # ヘッダ行が無いケースもあるが、取込フォーマットは必ずヘッダ付きと想定
+    if not TRADE_REQUIRED_HEADERS.issubset(set(header_cells)):
+        return []
+
+    index_map = {TRADE_HEADER_ALIASES[h]: i for i, h in enumerate(header_cells) if h in TRADE_HEADER_ALIASES}
+
+    trades: list[ParsedTrade] = []
+    for row_line in lines[1:]:
+        cells = row_line.split("\t")
+        if len(cells) < 5:
+            continue
+
+        def _get(field: str) -> str:
+            idx = index_map.get(field)
+            if idx is None or idx >= len(cells):
+                return ""
+            return cells[idx]
+
+        code = normalize_text(_get("code"))
+        name = normalize_text(_get("name"))
+        side = normalize_text(_get("side"))
+        price = _parse_trade_number(_get("price"))
+        quantity = _parse_trade_int(_get("quantity"))
+        if not code or not side or price <= 0 or quantity <= 0:
+            continue
+
+        executed_at, trade_date = _parse_trade_datetime(_get("executed_at"))
+        if trade_date is None and fallback_date:
+            trade_date = fallback_date
+            # 時刻のみのケースは executed_at が None のまま
+
+        trades.append(
+            ParsedTrade(
+                executed_at=executed_at,
+                trade_date=trade_date,
+                code=code,
+                name=name,
+                market=normalize_text(_get("market")),
+                side=side,
+                price=price,
+                quantity=quantity,
+                trade_no=normalize_text(_get("trade_no")),
+                receipt_no=normalize_text(_get("receipt_no")),
+                fill_flag=normalize_text(_get("fill_flag")),
+                internal_no=normalize_text(_get("internal_no")),
+                price_sign=normalize_text(_get("price_sign")),
+                raw_row=row_line,
+            )
+        )
+    return trades

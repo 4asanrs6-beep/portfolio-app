@@ -4,6 +4,11 @@ import pandas as pd
 
 
 COMPARE_KEYS = ["id_name", "code", "name", "account_category", "product_type", "strategy_key"]
+SESSION_ORDER = ["寄付", "前場前半", "前場後半", "後場前半", "後場後半", "引け", "時間外", "時間不明"]
+SESSION_GROUP_ORDER = ["前場", "後場", "引け・時間外", "時間不明"]
+HOLDING_BUCKET_ORDER = ["0-5分", "5-30分", "30-120分", "120分以上", "時間不明"]
+OVERNIGHT_HOLDING_DAY_ORDER = ["1日", "2-3日", "4-5日", "6-10日", "11日以上"]
+OVERNIGHT_POSITION_SIZE_ORDER = ["50万円未満", "50-100万円", "100-300万円", "300-500万円", "500万円以上"]
 
 
 def _fill_numeric(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
@@ -13,6 +18,546 @@ def _fill_numeric(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
             result[column] = 0
         result[column] = pd.to_numeric(result[column], errors="coerce").fillna(0)
     return result
+
+
+def _empty_intraday_roundtrips() -> pd.DataFrame:
+    return pd.DataFrame(
+        columns=[
+            "trade_date",
+            "code",
+            "name",
+            "direction",
+            "daytrade_qty",
+            "realized_pl",
+            "avg_buy_price",
+            "avg_sell_price",
+            "turnover",
+        ]
+    )
+
+
+def _prepare_trades(trades_df: pd.DataFrame) -> pd.DataFrame:
+    if trades_df.empty:
+        return trades_df.copy()
+
+    working = trades_df.copy()
+    for column in ["trade_date", "code", "name", "side"]:
+        if column not in working.columns:
+            working[column] = ""
+        working[column] = working[column].fillna("").astype(str).str.strip()
+
+    working = _fill_numeric(working, ["price", "quantity"])
+    working = working[
+        working["trade_date"].ne("")
+        & working["code"].ne("")
+        & working["side"].isin(["買", "売"])
+        & (working["price"] > 0)
+        & (working["quantity"] > 0)
+    ].copy()
+    if working.empty:
+        return working
+
+    working["_executed_ts"] = pd.to_datetime(working.get("executed_at"), errors="coerce")
+    if "id" not in working.columns:
+        working["id"] = range(1, len(working) + 1)
+    working["_row_order"] = range(len(working))
+    return working.sort_values(
+        ["trade_date", "code", "_executed_ts", "id", "_row_order"],
+        kind="stable",
+        na_position="last",
+    ).reset_index(drop=True)
+
+
+def _estimate_roundtrip_turnover(group: pd.DataFrame) -> int:
+    net_qty = 0
+    turnover = 0
+    for row in group.itertuples():
+        delta = int(row.quantity) if row.side == "買" else -int(row.quantity)
+        prev_qty = net_qty
+        net_qty += delta
+        if prev_qty != 0 and net_qty != 0 and prev_qty * net_qty < 0:
+            turnover += 1
+        elif prev_qty != 0 and net_qty == 0:
+            turnover += 1
+    return turnover
+
+
+def build_intraday_roundtrips(trades_df: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "trade_date",
+        "code",
+        "name",
+        "direction",
+        "daytrade_qty",
+        "realized_pl",
+        "avg_buy_price",
+        "avg_sell_price",
+        "turnover",
+    ]
+    if trades_df.empty:
+        return _empty_intraday_roundtrips()
+
+    working = _prepare_trades(trades_df)
+    if working.empty:
+        return _empty_intraday_roundtrips()
+
+    records: list[dict[str, object]] = []
+    grouped = working.groupby(["trade_date", "code"], sort=True, dropna=False)
+    for (trade_date, code), group in grouped:
+        buy_df = group[group["side"] == "買"]
+        sell_df = group[group["side"] == "売"]
+        buy_qty = float(buy_df["quantity"].sum())
+        sell_qty = float(sell_df["quantity"].sum())
+        daytrade_qty = int(min(buy_qty, sell_qty))
+        if daytrade_qty <= 0:
+            continue
+
+        buy_notional = float((buy_df["price"] * buy_df["quantity"]).sum())
+        sell_notional = float((sell_df["price"] * sell_df["quantity"]).sum())
+        avg_buy_price = buy_notional / buy_qty if buy_qty > 0 else 0.0
+        avg_sell_price = sell_notional / sell_qty if sell_qty > 0 else 0.0
+        realized_pl = (avg_sell_price - avg_buy_price) * daytrade_qty
+        first_side = group.iloc[0]["side"]
+        direction = "買い" if first_side == "買" else "売り"
+
+        records.append(
+            {
+                "trade_date": trade_date,
+                "code": code,
+                "name": group.iloc[0]["name"],
+                "direction": direction,
+                "daytrade_qty": daytrade_qty,
+                "realized_pl": realized_pl,
+                "avg_buy_price": avg_buy_price,
+                "avg_sell_price": avg_sell_price,
+                "turnover": _estimate_roundtrip_turnover(group),
+            }
+        )
+
+    if not records:
+        return _empty_intraday_roundtrips()
+
+    result = pd.DataFrame.from_records(records, columns=columns)
+    result["trade_date"] = pd.to_datetime(result["trade_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    result = _fill_numeric(result, ["daytrade_qty", "realized_pl", "avg_buy_price", "avg_sell_price", "turnover"])
+    result["daytrade_qty"] = result["daytrade_qty"].round(0).astype(int)
+    result["turnover"] = result["turnover"].round(0).astype(int)
+    return result.sort_values(["trade_date", "code"], kind="stable").reset_index(drop=True)
+
+
+def classify_session(executed_at_iso: str | None) -> str:
+    ts = pd.to_datetime(executed_at_iso, errors="coerce")
+    if pd.isna(ts):
+        return "時間不明"
+
+    minute_of_day = ts.hour * 60 + ts.minute + ts.second / 60
+    if 9 * 60 <= minute_of_day < 9 * 60 + 5:
+        return "寄付"
+    if 9 * 60 + 5 <= minute_of_day < 10 * 60 + 30:
+        return "前場前半"
+    if 10 * 60 + 30 <= minute_of_day < 11 * 60 + 30:
+        return "前場後半"
+    if 12 * 60 + 30 <= minute_of_day < 13 * 60 + 30:
+        return "後場前半"
+    if 13 * 60 + 30 <= minute_of_day < 14 * 60 + 55:
+        return "後場後半"
+    if 14 * 60 + 55 <= minute_of_day <= 15 * 60 + 30:
+        return "引け"
+    return "時間外"
+
+
+def build_trade_session_summary(trades_df: pd.DataFrame) -> pd.DataFrame:
+    columns = ["session", "trade_count", "quantity", "notional", "avg_notional"]
+    if trades_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    working = _prepare_trades(trades_df)
+    if working.empty:
+        return pd.DataFrame(columns=columns)
+
+    working["session"] = working["executed_at"].apply(classify_session)
+    working["notional"] = working["price"] * working["quantity"]
+    result = (
+        working.groupby("session", dropna=False, observed=False)
+        .agg(
+            trade_count=("id", "count"),
+            quantity=("quantity", "sum"),
+            notional=("notional", "sum"),
+            avg_notional=("notional", "mean"),
+        )
+        .reset_index()
+    )
+    result["session"] = pd.Categorical(result["session"], categories=SESSION_ORDER, ordered=True)
+    return result.sort_values("session").reset_index(drop=True)
+
+
+def build_trade_habit_profile(trades_df: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "trade_date",
+        "code",
+        "name",
+        "entry_direction",
+        "first_session",
+        "executions",
+        "buy_exec_count",
+        "sell_exec_count",
+        "total_qty",
+        "total_notional",
+        "first_executed_at",
+        "last_executed_at",
+        "holding_minutes",
+        "execution_style",
+    ]
+    if trades_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    working = _prepare_trades(trades_df)
+    if working.empty:
+        return pd.DataFrame(columns=columns)
+
+    working["session"] = working["executed_at"].apply(classify_session)
+    working["notional"] = working["price"] * working["quantity"]
+    profile = (
+        working.groupby(["trade_date", "code"], sort=True, dropna=False)
+        .agg(
+            name=("name", "first"),
+            first_side=("side", "first"),
+            first_session=("session", "first"),
+            executions=("id", "count"),
+            buy_exec_count=("side", lambda s: int((s == "買").sum())),
+            sell_exec_count=("side", lambda s: int((s == "売").sum())),
+            total_qty=("quantity", "sum"),
+            total_notional=("notional", "sum"),
+            first_executed_at=("executed_at", "first"),
+            last_executed_at=("executed_at", "last"),
+            first_ts=("_executed_ts", "min"),
+            last_ts=("_executed_ts", "max"),
+        )
+        .reset_index()
+    )
+    profile["entry_direction"] = profile["first_side"].map({"買": "買い", "売": "売り"}).fillna("不明")
+    profile["holding_minutes"] = (
+        (profile["last_ts"] - profile["first_ts"]).dt.total_seconds().div(60).fillna(0)
+    )
+    profile["execution_style"] = profile["executions"].apply(
+        lambda count: "単発" if count <= 2 else ("分割" if count <= 4 else "多段")
+    )
+    return (
+        profile[columns]
+        .sort_values(["trade_date", "first_executed_at", "code"], kind="stable")
+        .reset_index(drop=True)
+    )
+
+
+def _classify_session_group(session: str | None) -> str:
+    if session in {"寄付", "前場前半", "前場後半"}:
+        return "前場"
+    if session in {"後場前半", "後場後半"}:
+        return "後場"
+    if session in {"引け", "時間外"}:
+        return "引け・時間外"
+    return "時間不明"
+
+
+def _bucket_holding_minutes(minutes: float | int | None) -> str:
+    if minutes is None or pd.isna(minutes):
+        return "時間不明"
+    value = float(minutes)
+    if value < 5:
+        return "0-5分"
+    if value < 30:
+        return "5-30分"
+    if value < 120:
+        return "30-120分"
+    return "120分以上"
+
+
+def build_roundtrip_profile(trades_df: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "trade_date",
+        "code",
+        "name",
+        "direction",
+        "daytrade_qty",
+        "realized_pl",
+        "avg_buy_price",
+        "avg_sell_price",
+        "turnover",
+        "first_session",
+        "session_group",
+        "first_executed_at",
+        "last_executed_at",
+        "holding_minutes",
+        "holding_bucket",
+        "executions",
+        "total_notional",
+        "execution_style",
+        "outcome",
+        "first_executed_ts",
+    ]
+    roundtrip_df = build_intraday_roundtrips(trades_df)
+    if roundtrip_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    habit_df = build_trade_habit_profile(trades_df)
+    if habit_df.empty:
+        profile = roundtrip_df.copy()
+        profile["first_session"] = "時間不明"
+        profile["session_group"] = "時間不明"
+        profile["first_executed_at"] = None
+        profile["last_executed_at"] = None
+        profile["holding_minutes"] = None
+        profile["holding_bucket"] = "時間不明"
+        profile["executions"] = 0
+        profile["total_notional"] = 0.0
+        profile["execution_style"] = "不明"
+        profile["outcome"] = profile["realized_pl"].apply(lambda value: "Win" if value > 0 else ("Lose" if value < 0 else "Even"))
+        profile["first_executed_ts"] = pd.NaT
+        return profile[columns]
+
+    merge_cols = [
+        "trade_date",
+        "code",
+        "first_session",
+        "first_executed_at",
+        "last_executed_at",
+        "holding_minutes",
+        "executions",
+        "total_notional",
+        "execution_style",
+    ]
+    profile = roundtrip_df.merge(habit_df[merge_cols], on=["trade_date", "code"], how="left")
+    profile["first_session"] = profile["first_session"].fillna("時間不明")
+    profile["session_group"] = profile["first_session"].apply(_classify_session_group)
+    profile["holding_bucket"] = profile["holding_minutes"].apply(_bucket_holding_minutes)
+    profile["outcome"] = profile["realized_pl"].apply(lambda value: "Win" if value > 0 else ("Lose" if value < 0 else "Even"))
+    profile["first_executed_ts"] = pd.to_datetime(profile["first_executed_at"], errors="coerce")
+    profile["session_group"] = pd.Categorical(profile["session_group"], categories=SESSION_GROUP_ORDER, ordered=True)
+    profile["holding_bucket"] = pd.Categorical(profile["holding_bucket"], categories=HOLDING_BUCKET_ORDER, ordered=True)
+    return (
+        profile[columns]
+        .sort_values(["trade_date", "first_executed_ts", "code"], kind="stable")
+        .reset_index(drop=True)
+    )
+
+
+def _bucket_holding_days(days: float | int | None) -> str:
+    if days is None or pd.isna(days):
+        return "11日以上"
+    value = float(days)
+    if value < 2:
+        return "1日"
+    if value < 4:
+        return "2-3日"
+    if value < 6:
+        return "4-5日"
+    if value < 11:
+        return "6-10日"
+    return "11日以上"
+
+
+def _bucket_position_size(market_value_abs: float | int | None) -> str:
+    if market_value_abs is None or pd.isna(market_value_abs):
+        return "50万円未満"
+    value = float(market_value_abs)
+    if value < 500_000:
+        return "50万円未満"
+    if value < 1_000_000:
+        return "50-100万円"
+    if value < 3_000_000:
+        return "100-300万円"
+    if value < 5_000_000:
+        return "300-500万円"
+    return "500万円以上"
+
+
+def build_overnight_hold_profile(snapshots_df: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "entry_date",
+        "exit_date",
+        "code",
+        "name",
+        "direction",
+        "holding_days",
+        "observed_days",
+        "total_tr_pl",
+        "total_realized_pl",
+        "avg_daily_tr_pl",
+        "final_unrealized_pl",
+        "entry_market_value_abs",
+        "avg_market_value_abs",
+        "max_market_value_abs",
+        "position_size_bucket",
+        "size_efficiency_pct",
+        "daily_efficiency_pct",
+        "status",
+        "close_reason",
+        "outcome",
+        "holding_day_bucket",
+    ]
+    if snapshots_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    working = snapshots_df.copy()
+    if "snapshot_date" not in working.columns:
+        return pd.DataFrame(columns=columns)
+
+    for column in ["code", "name", "account_category", "product_type", "strategy_key"]:
+        if column not in working.columns:
+            working[column] = ""
+        working[column] = working[column].fillna("").astype(str).str.strip()
+
+    if "id_name" not in working.columns:
+        working["id_name"] = (
+            working["code"].fillna("").astype(str).str.strip()
+            + "_"
+            + working["name"].fillna("").astype(str).str.strip()
+        )
+
+    working["snapshot_date"] = pd.to_datetime(working["snapshot_date"], errors="coerce")
+    working = working.dropna(subset=["snapshot_date"]).copy()
+    if working.empty:
+        return pd.DataFrame(columns=columns)
+
+    working = _fill_numeric(
+        working,
+        ["net_qty", "tr_pl", "realized_pl", "unrealized_pl", "position_market_value_jpy"],
+    )
+    working["position_sign"] = working["net_qty"].apply(lambda value: 1 if value > 0 else (-1 if value < 0 else 0))
+    group_cols = [column for column in COMPARE_KEYS if column in working.columns]
+    if not group_cols:
+        group_cols = ["code", "name"]
+    working = working.sort_values(group_cols + ["snapshot_date"], kind="stable").reset_index(drop=True)
+
+    records: list[dict[str, object]] = []
+
+    def _finalize_episode(episode: dict[str, object], exit_date: pd.Timestamp, status: str, close_reason: str) -> None:
+        holding_days = max(int((exit_date - episode["entry_date"]).days), 0)
+        if holding_days < 1:
+            return
+        total_tr_pl = float(episode["total_tr_pl"])
+        observed_days = int(episode["observed_days"])
+        avg_market_value_abs = float(episode["market_value_abs_sum"]) / observed_days if observed_days else 0.0
+        size_efficiency_pct = total_tr_pl / avg_market_value_abs * 100 if avg_market_value_abs > 0 else 0.0
+        daily_efficiency_pct = (
+            total_tr_pl / (avg_market_value_abs * observed_days) * 100
+            if avg_market_value_abs > 0 and observed_days > 0 else 0.0
+        )
+        records.append(
+            {
+                "entry_date": episode["entry_date"],
+                "exit_date": exit_date,
+                "code": episode["code"],
+                "name": episode["name"],
+                "direction": episode["direction"],
+                "holding_days": holding_days,
+                "observed_days": observed_days,
+                "total_tr_pl": total_tr_pl,
+                "total_realized_pl": float(episode["total_realized_pl"]),
+                "avg_daily_tr_pl": total_tr_pl / observed_days if observed_days else 0.0,
+                "final_unrealized_pl": float(episode["final_unrealized_pl"]),
+                "entry_market_value_abs": float(episode["entry_market_value_abs"]),
+                "avg_market_value_abs": avg_market_value_abs,
+                "max_market_value_abs": float(episode["max_market_value_abs"]),
+                "position_size_bucket": _bucket_position_size(avg_market_value_abs),
+                "size_efficiency_pct": size_efficiency_pct,
+                "daily_efficiency_pct": daily_efficiency_pct,
+                "status": status,
+                "close_reason": close_reason,
+                "outcome": "Win" if total_tr_pl > 0 else ("Lose" if total_tr_pl < 0 else "Even"),
+                "holding_day_bucket": _bucket_holding_days(holding_days),
+            }
+        )
+
+    for _, group in working.groupby(group_cols, dropna=False, sort=False):
+        group = group.sort_values("snapshot_date", kind="stable").reset_index(drop=True)
+        episode: dict[str, object] | None = None
+
+        for row in group.itertuples():
+            sign = int(getattr(row, "position_sign", 0))
+            if episode is None:
+                if sign == 0:
+                    continue
+                episode = {
+                    "entry_date": row.snapshot_date,
+                    "code": row.code,
+                    "name": row.name,
+                    "direction": "買い" if sign > 0 else "売り",
+                    "sign": sign,
+                    "observed_days": 1,
+                    "total_tr_pl": float(row.tr_pl),
+                    "total_realized_pl": float(row.realized_pl),
+                    "final_unrealized_pl": float(row.unrealized_pl),
+                    "entry_market_value_abs": abs(float(row.position_market_value_jpy)),
+                    "market_value_abs_sum": abs(float(row.position_market_value_jpy)),
+                    "max_market_value_abs": abs(float(row.position_market_value_jpy)),
+                    "last_observed_date": row.snapshot_date,
+                }
+                continue
+
+            if sign == int(episode["sign"]):
+                episode["observed_days"] = int(episode["observed_days"]) + 1
+                episode["total_tr_pl"] = float(episode["total_tr_pl"]) + float(row.tr_pl)
+                episode["total_realized_pl"] = float(episode["total_realized_pl"]) + float(row.realized_pl)
+                episode["final_unrealized_pl"] = float(row.unrealized_pl)
+                episode["market_value_abs_sum"] = float(episode["market_value_abs_sum"]) + abs(float(row.position_market_value_jpy))
+                episode["max_market_value_abs"] = max(
+                    float(episode["max_market_value_abs"]),
+                    abs(float(row.position_market_value_jpy)),
+                )
+                episode["last_observed_date"] = row.snapshot_date
+                continue
+
+            if sign == 0:
+                episode["total_tr_pl"] = float(episode["total_tr_pl"]) + float(row.tr_pl)
+                episode["total_realized_pl"] = float(episode["total_realized_pl"]) + float(row.realized_pl)
+                episode["final_unrealized_pl"] = float(row.unrealized_pl)
+                _finalize_episode(episode, row.snapshot_date, "クローズ", "フラット")
+                episode = None
+                continue
+
+            _finalize_episode(episode, row.snapshot_date, "ドテン", "方向転換")
+            episode = {
+                "entry_date": row.snapshot_date,
+                "code": row.code,
+                "name": row.name,
+                "direction": "買い" if sign > 0 else "売り",
+                "sign": sign,
+                "observed_days": 1,
+                "total_tr_pl": float(row.tr_pl),
+                "total_realized_pl": float(row.realized_pl),
+                "final_unrealized_pl": float(row.unrealized_pl),
+                "entry_market_value_abs": abs(float(row.position_market_value_jpy)),
+                "market_value_abs_sum": abs(float(row.position_market_value_jpy)),
+                "max_market_value_abs": abs(float(row.position_market_value_jpy)),
+                "last_observed_date": row.snapshot_date,
+            }
+
+        if episode is not None:
+            _finalize_episode(
+                episode,
+                pd.Timestamp(episode["last_observed_date"]),
+                "継続中",
+                "観測末尾",
+            )
+
+    if not records:
+        return pd.DataFrame(columns=columns)
+
+    result = pd.DataFrame.from_records(records, columns=columns)
+    result["entry_date"] = pd.to_datetime(result["entry_date"], errors="coerce")
+    result["exit_date"] = pd.to_datetime(result["exit_date"], errors="coerce")
+    result["holding_day_bucket"] = pd.Categorical(
+        result["holding_day_bucket"],
+        categories=OVERNIGHT_HOLDING_DAY_ORDER,
+        ordered=True,
+    )
+    result["position_size_bucket"] = pd.Categorical(
+        result["position_size_bucket"],
+        categories=OVERNIGHT_POSITION_SIZE_ORDER,
+        ordered=True,
+    )
+    return result.sort_values(["exit_date", "entry_date", "code"], kind="stable").reset_index(drop=True)
 
 
 def summarize_by_direction(df: pd.DataFrame) -> pd.DataFrame:
@@ -356,6 +901,70 @@ def build_daily_trend(df: pd.DataFrame) -> pd.DataFrame:
     return result.sort_values("snapshot_date").reset_index(drop=True)
 
 
+def build_daily_trend_by_direction(df: pd.DataFrame) -> pd.DataFrame:
+    """日次×方向(買い/売り/フラット)で損益を集計した long-form DataFrame を返す。"""
+    columns = ["snapshot_date", "方向", "TR損益", "実現損益", "評価損益", "損益", "評価額(円貨)", "件数"]
+    if df.empty:
+        return pd.DataFrame(columns=columns)
+
+    working = _fill_numeric(df, ["tr_pl", "realized_pl", "unrealized_pl", "net_pl", "position_market_value_jpy"])
+    if "direction" not in working.columns:
+        working = working.copy()
+        working["direction"] = "フラット"
+    working["direction"] = working["direction"].fillna("フラット").replace("", "フラット")
+
+    result = (
+        working.groupby(["snapshot_date", "direction"], dropna=False)
+        .agg(
+            **{
+                "TR損益": ("tr_pl", "sum"),
+                "実現損益": ("realized_pl", "sum"),
+                "評価損益": ("unrealized_pl", "sum"),
+                "損益": ("net_pl", "sum"),
+                "評価額(円貨)": ("position_market_value_jpy", "sum"),
+                "件数": ("code", "count"),
+            }
+        )
+        .reset_index()
+        .rename(columns={"direction": "方向"})
+    )
+    result["snapshot_date"] = pd.to_datetime(result["snapshot_date"])
+    return result.sort_values(["snapshot_date", "方向"]).reset_index(drop=True)
+
+
+def build_daily_exposure(df: pd.DataFrame) -> pd.DataFrame:
+    """日次のロング/ショート評価額・グロス/ネット・傾き(ネット÷グロス)を集計。
+
+    符号は position_market_value_jpy の符号で分類(市場タブの既存集計と同一基準)。
+    """
+    columns = ["snapshot_date", "ロング評価額", "ショート評価額", "グロス評価額", "ネット評価額", "傾き"]
+    if df.empty:
+        return pd.DataFrame(columns=columns)
+
+    work = df.copy()
+    mv = pd.to_numeric(work.get("position_market_value_jpy", 0), errors="coerce").fillna(0)
+    work["_long_mv"] = mv.clip(lower=0)
+    work["_short_mv"] = mv.clip(upper=0)
+    result = (
+        work.groupby("snapshot_date", dropna=False)
+        .agg(
+            **{
+                "ロング評価額": ("_long_mv", "sum"),
+                "ショート評価額": ("_short_mv", "sum"),
+            }
+        )
+        .reset_index()
+    )
+    result["グロス評価額"] = result["ロング評価額"] - result["ショート評価額"]
+    result["ネット評価額"] = result["ロング評価額"] + result["ショート評価額"]
+    result["傾き"] = result.apply(
+        lambda r: r["ネット評価額"] / r["グロス評価額"] if r["グロス評価額"] > 0 else 0.0,
+        axis=1,
+    )
+    result["snapshot_date"] = pd.to_datetime(result["snapshot_date"])
+    return result.sort_values("snapshot_date").reset_index(drop=True)
+
+
 def build_monthly_pnl(df: pd.DataFrame, month: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     if df.empty:
         empty_daily = pd.DataFrame(columns=["snapshot_date", "TR損益", "実現損益", "評価損益", "損益", "評価額(円貨)", "件数"])
@@ -429,3 +1038,50 @@ def build_instrument_timeline(df: pd.DataFrame, code: str) -> pd.DataFrame:
     )
     timeline["方向"] = timeline["ネット数量"].apply(lambda qty: "買い" if qty > 0 else ("売り" if qty < 0 else "フラット"))
     return timeline
+
+
+def build_instrument_timeline_by_direction(df: pd.DataFrame, code: str) -> pd.DataFrame:
+    """銘柄の日次×方向別タイムライン。両建てや日中ドテンを分離して表示できる。"""
+    columns = [
+        "snapshot_date", "コード", "銘柄名", "方向",
+        "ネット数量", "買数量", "売数量",
+        "評価額(円貨)", "評価損益", "実現損益", "TR損益", "損益",
+    ]
+    if df.empty:
+        return pd.DataFrame(columns=columns)
+
+    target = df[df["code"] == code].copy()
+    if target.empty:
+        return pd.DataFrame(columns=columns)
+
+    target["snapshot_date"] = pd.to_datetime(target["snapshot_date"])
+    target = _fill_numeric(
+        target,
+        ["net_qty", "buy_qty", "sell_qty", "position_market_value_jpy", "unrealized_pl", "realized_pl", "tr_pl", "net_pl"],
+    )
+    if "direction" not in target.columns:
+        target["direction"] = "フラット"
+    target["direction"] = target["direction"].fillna("フラット").replace("", "フラット")
+
+    timeline = (
+        target.groupby(["snapshot_date", "direction"], dropna=False)
+        .agg(
+            コード=("code", "first"),
+            銘柄名=("name", "first"),
+            ネット数量=("net_qty", "sum"),
+            買数量=("buy_qty", "sum"),
+            売数量=("sell_qty", "sum"),
+            **{
+                "評価額(円貨)": ("position_market_value_jpy", "sum"),
+                "評価損益": ("unrealized_pl", "sum"),
+                "実現損益": ("realized_pl", "sum"),
+                "TR損益": ("tr_pl", "sum"),
+                "損益": ("net_pl", "sum"),
+            },
+        )
+        .reset_index()
+        .rename(columns={"direction": "方向"})
+        .sort_values(["snapshot_date", "方向"])
+        .reset_index(drop=True)
+    )
+    return timeline[columns]
